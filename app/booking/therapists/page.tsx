@@ -1,48 +1,96 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { supabase } from "@/lib/supabase";
 
-const services = [
-  { name: "Logopedski tretman", slug: "logopedski-tretman" },
-  { name: "Defektološki tretman", slug: "defektoloski-tretman" },
-  { name: "Inicijalna procena", slug: "inicijalna-procena" },
-  { name: "Kontrolni pregled", slug: "kontrolni-pregled" },
-];
+type Service = {
+  id: number;
+  name: string;
+  slug: string;
+};
 
-const therapists = [
-  {
-    id: 1,
-    slug: "jelena-petrovic",
-    name: "Jelena Petrović",
-    specialty: "Diplomirani logoped",
-    services: [
-      "logopedski-tretman",
-      "inicijalna-procena",
-      "kontrolni-pregled",
-    ],
-  },
-  {
-    id: 2,
-    slug: "marko-jovanovic",
-    name: "Marko Jovanović",
-    specialty: "Specijalni edukator i rehabilitator",
-    services: [
-      "defektoloski-tretman",
-      "inicijalna-procena",
-      "kontrolni-pregled",
-    ],
-  },
-  {
-    id: 3,
-    slug: "milica-nikolic",
-    name: "Milica Nikolić",
-    specialty: "Logoped i reedukator psihomotorike",
-    services: [
-      "logopedski-tretman",
-      "defektoloski-tretman",
-      "inicijalna-procena",
-    ],
-  },
-];
+type Therapist = {
+  id: number;
+  name: string;
+  slug: string;
+  specialty: string;
+};
+
+type TherapistPageData = {
+  selectedService: Service | null;
+  availableTherapists: Therapist[];
+  hasError: boolean;
+};
+
+async function loadTherapistsForService(
+  serviceSlug?: string,
+): Promise<TherapistPageData> {
+  if (!serviceSlug) {
+    return {
+      selectedService: null,
+      availableTherapists: [],
+      hasError: false,
+    };
+  }
+
+  const { data: selectedService, error: serviceError } = await supabase
+    .from("services")
+    .select("id, name, slug")
+    .eq("slug", serviceSlug)
+    .maybeSingle();
+
+  if (serviceError) {
+    return {
+      selectedService: null,
+      availableTherapists: [],
+      hasError: true,
+    };
+  }
+
+  if (!selectedService) {
+    return {
+      selectedService: null,
+      availableTherapists: [],
+      hasError: false,
+    };
+  }
+
+  const { data: serviceLinks, error: linksError } = await supabase
+    .from("therapist_services")
+    .select("therapist_id")
+    .eq("service_id", selectedService.id);
+
+  if (linksError) {
+    return {
+      selectedService,
+      availableTherapists: [],
+      hasError: true,
+    };
+  }
+
+  const therapistIds = [
+    ...new Set((serviceLinks ?? []).map((link) => link.therapist_id)),
+  ];
+
+  if (therapistIds.length === 0) {
+    return {
+      selectedService,
+      availableTherapists: [],
+      hasError: false,
+    };
+  }
+
+  const { data: availableTherapists, error: therapistsError } = await supabase
+    .from("therapists")
+    .select("id, name, slug, specialty:speciality")
+    .in("id", therapistIds)
+    .order("id", { ascending: true });
+
+  return {
+    selectedService,
+    availableTherapists: availableTherapists ?? [],
+    hasError: Boolean(therapistsError),
+  };
+}
 
 export const metadata: Metadata = {
   title: "Izaberite terapeuta | Centar za razvoj i rehabilitaciju",
@@ -60,14 +108,8 @@ export default async function TherapistsPage({
   const serviceSlug = Array.isArray(serviceParam)
     ? serviceParam[0]
     : serviceParam;
-  const selectedService = services.find(
-    (service) => service.slug === serviceSlug,
-  );
-  const availableTherapists = selectedService
-    ? therapists.filter((therapist) =>
-        therapist.services.includes(selectedService.slug),
-      )
-    : [];
+  const { selectedService, availableTherapists, hasError } =
+    await loadTherapistsForService(serviceSlug);
 
   return (
     <div className="relative flex min-h-screen flex-col overflow-hidden bg-[#fffaf3] text-[#243c38]">
@@ -123,14 +165,25 @@ export default async function TherapistsPage({
                   {selectedService.name}
                 </span>
               </p>
-            ) : (
+            ) : !hasError ? (
               <p className="mt-4 text-lg text-[#526b66] sm:text-xl">
                 Usluga nije izabrana. Vratite se i izaberite željenu uslugu.
               </p>
-            )}
+            ) : null}
           </div>
 
-          {selectedService && (
+          {hasError ? (
+            <div
+              role="alert"
+              className="mt-10 rounded-3xl border border-[#b45745]/20 bg-white/75 p-6 text-[#8f4033] shadow-[0_12px_35px_rgba(36,60,56,0.05)]"
+            >
+              Terapeute trenutno nije moguće učitati. Pokušajte ponovo kasnije.
+            </div>
+          ) : selectedService && availableTherapists.length === 0 ? (
+            <div className="mt-10 rounded-3xl border border-[#397267]/12 bg-white/75 p-6 text-[#526b66] shadow-[0_12px_35px_rgba(36,60,56,0.05)]">
+              Trenutno nema dostupnih terapeuta za izabranu uslugu.
+            </div>
+          ) : selectedService ? (
             <div className="mt-10">
               <Link
                 href={{
@@ -202,7 +255,7 @@ export default async function TherapistsPage({
                 ))}
               </div>
             </div>
-          )}
+          ) : null}
         </section>
       </main>
     </div>
