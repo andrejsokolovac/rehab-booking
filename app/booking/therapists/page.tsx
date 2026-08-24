@@ -11,6 +11,7 @@ const services = [
 const therapists = [
   {
     id: 1,
+    slug: "jelena-petrovic",
     name: "Jelena Petrović",
     specialty: "Diplomirani logoped",
     services: [
@@ -21,6 +22,7 @@ const therapists = [
   },
   {
     id: 2,
+    slug: "marko-jovanovic",
     name: "Marko Jovanović",
     specialty: "Specijalni edukator i rehabilitator",
     services: [
@@ -31,6 +33,7 @@ const therapists = [
   },
   {
     id: 3,
+    slug: "milica-nikolic",
     name: "Milica Nikolić",
     specialty: "Logoped i reedukator psihomotorike",
     services: [
@@ -129,8 +132,14 @@ export default async function TherapistsPage({
 
           {selectedService && (
             <div className="mt-10">
-              <button
-                type="button"
+              <Link
+                href={{
+                  pathname: "/booking/date",
+                  query: {
+                    service: selectedService.slug,
+                    therapist: "any",
+                  },
+                }}
                 className="group flex w-full cursor-pointer items-center justify-between gap-5 rounded-3xl bg-[#397267] p-6 text-left text-white shadow-[0_14px_35px_rgba(57,114,103,0.2)] transition hover:-translate-y-0.5 hover:bg-[#2f6158] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267] sm:p-7"
               >
                 <span>
@@ -147,7 +156,7 @@ export default async function TherapistsPage({
                 >
                   →
                 </span>
-              </button>
+              </Link>
 
               <h2 className="mt-12 text-sm font-semibold tracking-[0.12em] text-[#526b66] uppercase">
                 Dostupni terapeuti
@@ -155,9 +164,15 @@ export default async function TherapistsPage({
 
               <div className="mt-5 grid gap-4 sm:grid-cols-2 sm:gap-5">
                 {availableTherapists.map((therapist) => (
-                  <button
+                  <Link
                     key={therapist.id}
-                    type="button"
+                    href={{
+                      pathname: "/booking/date",
+                      query: {
+                        service: selectedService.slug,
+                        therapist: therapist.slug,
+                      },
+                    }}
                     className="group flex min-h-32 cursor-pointer items-center gap-5 rounded-3xl border border-[#397267]/12 bg-white/80 p-6 text-left shadow-[0_12px_35px_rgba(36,60,56,0.06)] transition hover:-translate-y-0.5 hover:border-[#397267]/30 hover:bg-white hover:shadow-[0_16px_40px_rgba(36,60,56,0.1)] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267]"
                   >
                     <span
@@ -183,7 +198,7 @@ export default async function TherapistsPage({
                     >
                       →
                     </span>
-                  </button>
+                  </Link>
                 ))}
               </div>
             </div>
