@@ -1,20 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { supabase } from "@/lib/supabase";
 
 const BELGRADE_TIME_ZONE = "Europe/Belgrade";
-
-const services = [
-  { name: "Logopedski tretman", slug: "logopedski-tretman" },
-  { name: "Defektološki tretman", slug: "defektoloski-tretman" },
-  { name: "Inicijalna procena", slug: "inicijalna-procena" },
-  { name: "Kontrolni pregled", slug: "kontrolni-pregled" },
-];
-
-const therapists = [
-  { name: "Jelena Petrović", slug: "jelena-petrovic" },
-  { name: "Marko Jovanović", slug: "marko-jovanovic" },
-  { name: "Milica Nikolić", slug: "milica-nikolic" },
-];
 
 const dateFormatter = new Intl.DateTimeFormat("sr-Latn-RS", {
   weekday: "long",
@@ -39,9 +27,17 @@ function formatSelectedDate(value?: string) {
   return formatted.charAt(0).toLocaleUpperCase("sr-Latn-RS") + formatted.slice(1);
 }
 
+function isValidTime(value?: string) {
+  const match = value?.match(/^(\d{2}):(\d{2})$/);
+
+  return Boolean(
+    match && Number(match[1]) <= 23 && Number(match[2]) <= 59,
+  );
+}
+
 export const metadata: Metadata = {
   title: "Potvrda termina | Centar za razvoj i rehabilitaciju",
-  description: "Probna potvrda izabranog termina.",
+  description: "Potvrda uspešno zakazanog termina.",
 };
 
 type ConfirmationPageProps = {
@@ -50,8 +46,6 @@ type ConfirmationPageProps = {
     therapist?: string | string[];
     date?: string | string[];
     time?: string | string[];
-    parent?: string | string[];
-    child?: string | string[];
   }>;
 };
 
@@ -66,24 +60,31 @@ export default async function ConfirmationPage({
   const therapistSlug = getValue(params.therapist);
   const dateValue = getValue(params.date);
   const timeValue = getValue(params.time);
-  const parentName = getValue(params.parent);
-  const childName = getValue(params.child);
-
-  const selectedService = services.find(
-    (service) => service.slug === serviceSlug,
-  );
-  const selectedTherapist =
-    therapistSlug === "any"
-      ? { name: "Prvi slobodan terapeut", slug: "any" }
-      : therapists.find((therapist) => therapist.slug === therapistSlug);
   const formattedDate = formatSelectedDate(dateValue);
+  const [serviceResult, therapistResult] =
+    serviceSlug && therapistSlug
+      ? await Promise.all([
+          supabase
+            .from("services")
+            .select("name, slug")
+            .eq("slug", serviceSlug)
+            .maybeSingle(),
+          supabase
+            .from("therapists")
+            .select("name, slug")
+            .eq("slug", therapistSlug)
+            .maybeSingle(),
+        ])
+      : [null, null];
+  const selectedService = serviceResult?.data;
+  const selectedTherapist = therapistResult?.data;
   const confirmationIsValid = Boolean(
     selectedService &&
       selectedTherapist &&
       formattedDate &&
-      timeValue &&
-      parentName &&
-      childName,
+      isValidTime(timeValue) &&
+      !serviceResult?.error &&
+      !therapistResult?.error,
   );
 
   return (
@@ -127,17 +128,16 @@ export default async function ConfirmationPage({
                 ✓
               </span>
               <p className="mt-7 text-sm font-semibold tracking-[0.12em] text-[#397267] uppercase">
-                Probna potvrda
+                Rezervacija potvrđena
               </p>
               <h1 className="mt-4 text-4xl leading-tight font-semibold tracking-[-0.035em] text-[#243c38] sm:text-5xl">
                 Termin je uspešno zakazan
               </h1>
               <p className="mt-5 text-lg leading-8 text-[#526b66]">
-                Hvala, {parentName}. U nastavku je pregled izabranog termina za
-                dete {childName}.
+                Vaš termin je sačuvan. U nastavku je pregled rezervacije.
               </p>
 
-              <div className="mt-10 grid gap-4 rounded-3xl border border-[#397267]/12 bg-white/80 p-6 text-left shadow-[0_14px_38px_rgba(36,60,56,0.07)] sm:grid-cols-2 sm:p-8">
+              <div className="mt-10 grid gap-4 rounded-3xl border border-[#397267]/12 bg-white/80 p-6 text-left shadow-[0_14px_38px_rgba(36,60,56,0.07)] sm:grid-cols-3 sm:p-8">
                 <div>
                   <p className="text-xs font-semibold tracking-[0.12em] text-[#6b807c] uppercase">
                     Usluga
@@ -160,17 +160,6 @@ export default async function ConfirmationPage({
                     {formattedDate}, {timeValue}
                   </p>
                 </div>
-                <div>
-                  <p className="text-xs font-semibold tracking-[0.12em] text-[#6b807c] uppercase">
-                    Dete
-                  </p>
-                  <p className="mt-2 font-semibold">{childName}</p>
-                </div>
-              </div>
-
-              <div className="mt-6 rounded-2xl border border-[#d69a6b]/25 bg-[#f9dfcb]/55 px-5 py-4 text-sm leading-6 text-[#765542]">
-                Ovo je trenutno samo probna potvrda u korisničkom interfejsu.
-                Termin nije sačuvan niti poslat centru.
               </div>
             </>
           ) : (

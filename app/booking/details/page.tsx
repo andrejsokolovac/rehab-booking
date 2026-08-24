@@ -1,46 +1,43 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { supabase } from "@/lib/supabase";
 import DetailsForm from "./details-form";
 
 const BELGRADE_TIME_ZONE = "Europe/Belgrade";
-const OCCUPIED_TIMES = new Set(["09:30", "11:45", "14:00"]);
+const APPOINTMENT_BUFFER_MINUTES = 15;
 
-const services = [
-  { name: "Logopedski tretman", slug: "logopedski-tretman" },
-  { name: "Defektološki tretman", slug: "defektoloski-tretman" },
-  { name: "Inicijalna procena", slug: "inicijalna-procena" },
-  { name: "Kontrolni pregled", slug: "kontrolni-pregled" },
-];
+type Service = {
+  id: number;
+  name: string;
+  slug: string;
+  duration_minutes: number;
+};
 
-const therapists = [
-  {
-    name: "Jelena Petrović",
-    slug: "jelena-petrovic",
-    services: [
-      "logopedski-tretman",
-      "inicijalna-procena",
-      "kontrolni-pregled",
-    ],
-  },
-  {
-    name: "Marko Jovanović",
-    slug: "marko-jovanovic",
-    services: [
-      "defektoloski-tretman",
-      "inicijalna-procena",
-      "kontrolni-pregled",
-    ],
-  },
-  {
-    name: "Milica Nikolić",
-    slug: "milica-nikolic",
-    services: [
-      "logopedski-tretman",
-      "defektoloski-tretman",
-      "inicijalna-procena",
-    ],
-  },
-];
+type Therapist = {
+  id: number;
+  name: string;
+  slug: string;
+};
+
+type WorkingHour = {
+  therapist_id: number;
+  start_time: string;
+  end_time: string;
+};
+
+type SelectedDate = {
+  formatted: string;
+  dayOfWeek: number;
+};
+
+type BookingSelection = {
+  selectedService: Service | null;
+  selectedTherapist: Omit<Therapist, "id"> | Therapist | null;
+  therapistCandidates: Therapist[];
+  formattedDate: string | null;
+  startAt: string | null;
+  hasError: boolean;
+};
 
 const dateFormatter = new Intl.DateTimeFormat("sr-Latn-RS", {
   weekday: "long",
@@ -50,39 +47,328 @@ const dateFormatter = new Intl.DateTimeFormat("sr-Latn-RS", {
   timeZone: BELGRADE_TIME_ZONE,
 });
 
-function formatSelectedDate(value?: string) {
-  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return undefined;
+const weekdayFormatter = new Intl.DateTimeFormat("en-US", {
+  weekday: "short",
+  timeZone: BELGRADE_TIME_ZONE,
+});
+
+const zonedDateTimeFormatter = new Intl.DateTimeFormat("en-CA", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+  timeZone: BELGRADE_TIME_ZONE,
+});
+
+const databaseDayByWeekday: Record<string, number> = {
+  Mon: 1,
+  Tue: 2,
+  Wed: 3,
+  Thu: 4,
+  Fri: 5,
+  Sat: 6,
+  Sun: 7,
+};
+
+function getSelectedDate(value?: string): SelectedDate | null {
+  const match = value?.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+  if (!match) {
+    return null;
   }
 
-  const date = new Date(`${value}T12:00:00Z`);
+  const [, year, month, day] = match;
+  const date = new Date(
+    Date.UTC(Number(year), Number(month) - 1, Number(day), 12),
+  );
 
-  if (Number.isNaN(date.getTime())) {
-    return undefined;
+  if (
+    date.getUTCFullYear() !== Number(year) ||
+    date.getUTCMonth() !== Number(month) - 1 ||
+    date.getUTCDate() !== Number(day)
+  ) {
+    return null;
   }
 
   const formatted = dateFormatter.format(date);
-  return formatted.charAt(0).toLocaleUpperCase("sr-Latn-RS") + formatted.slice(1);
+
+  return {
+    formatted:
+      formatted.charAt(0).toLocaleUpperCase("sr-Latn-RS") + formatted.slice(1),
+    dayOfWeek: databaseDayByWeekday[weekdayFormatter.format(date)],
+  };
 }
 
-function isAvailableTime(value?: string) {
-  if (!value || !/^\d{2}:\d{2}$/.test(value) || OCCUPIED_TIMES.has(value)) {
+function parseTime(value?: string) {
+  const match = value?.match(/^(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const seconds = Number(match[3] ?? 0);
+
+  if (hours > 23 || minutes > 59 || seconds !== 0) {
+    return null;
+  }
+
+  return hours * 60 + minutes;
+}
+
+function getZonedParts(date: Date) {
+  const parts = Object.fromEntries(
+    zonedDateTimeFormatter
+      .formatToParts(date)
+      .map((part) => [part.type, Number(part.value)]),
+  );
+
+  return {
+    year: parts.year,
+    month: parts.month,
+    day: parts.day,
+    hour: parts.hour,
+    minute: parts.minute,
+    second: parts.second,
+  };
+}
+
+function getTimeZoneOffset(instant: Date) {
+  const parts = getZonedParts(instant);
+
+  return (
+    Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day,
+      parts.hour,
+      parts.minute,
+      parts.second,
+    ) - instant.getTime()
+  );
+}
+
+function toBelgradeInstant(dateValue?: string, timeValue?: string) {
+  const dateMatch = dateValue?.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const totalMinutes = parseTime(timeValue);
+
+  if (!dateMatch || totalMinutes === null) {
+    return null;
+  }
+
+  const [, year, month, day] = dateMatch;
+  const hour = Math.floor(totalMinutes / 60);
+  const minute = totalMinutes % 60;
+  const localTimestamp = Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    hour,
+    minute,
+  );
+  let instantTimestamp = localTimestamp;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const offset = getTimeZoneOffset(new Date(instantTimestamp));
+    const adjustedTimestamp = localTimestamp - offset;
+
+    if (adjustedTimestamp === instantTimestamp) {
+      break;
+    }
+
+    instantTimestamp = adjustedTimestamp;
+  }
+
+  const instant = new Date(instantTimestamp);
+  const zonedParts = getZonedParts(instant);
+
+  if (
+    zonedParts.year !== Number(year) ||
+    zonedParts.month !== Number(month) ||
+    zonedParts.day !== Number(day) ||
+    zonedParts.hour !== hour ||
+    zonedParts.minute !== minute
+  ) {
+    return null;
+  }
+
+  return instant.toISOString();
+}
+
+function worksAtSelectedTime(
+  workingHour: WorkingHour,
+  startMinutes: number,
+  durationMinutes: number,
+) {
+  const intervalStart = parseTime(workingHour.start_time);
+  const intervalEnd = parseTime(workingHour.end_time);
+
+  if (intervalStart === null || intervalEnd === null) {
     return false;
   }
 
-  const [hours, minutes] = value.split(":").map(Number);
-  const totalMinutes = hours * 60 + minutes;
-
   return (
-    totalMinutes >= 8 * 60 &&
-    totalMinutes + 45 <= 16 * 60 &&
-    (totalMinutes - 8 * 60) % 45 === 0
+    startMinutes >= intervalStart &&
+    startMinutes + durationMinutes <= intervalEnd &&
+    (startMinutes - intervalStart) %
+      (durationMinutes + APPOINTMENT_BUFFER_MINUTES) ===
+      0
   );
+}
+
+async function loadBookingSelection(
+  serviceSlug?: string,
+  therapistSlug?: string,
+  dateValue?: string,
+  timeValue?: string,
+): Promise<BookingSelection> {
+  const selectedDate = getSelectedDate(dateValue);
+  const startAt = toBelgradeInstant(dateValue, timeValue);
+  const startMinutes = parseTime(timeValue);
+  const emptyResult: BookingSelection = {
+    selectedService: null,
+    selectedTherapist: null,
+    therapistCandidates: [],
+    formattedDate: selectedDate?.formatted ?? null,
+    startAt,
+    hasError: false,
+  };
+
+  if (
+    !serviceSlug ||
+    !therapistSlug ||
+    !selectedDate ||
+    !startAt ||
+    startMinutes === null
+  ) {
+    return emptyResult;
+  }
+
+  const { data: selectedService, error: serviceError } = await supabase
+    .from("services")
+    .select("id, name, slug, duration_minutes")
+    .eq("slug", serviceSlug)
+    .maybeSingle();
+
+  if (serviceError) {
+    return { ...emptyResult, hasError: true };
+  }
+
+  if (!selectedService) {
+    return emptyResult;
+  }
+
+  if (therapistSlug !== "any") {
+    const { data: selectedTherapist, error: therapistError } = await supabase
+      .from("therapists")
+      .select("id, name, slug")
+      .eq("slug", therapistSlug)
+      .maybeSingle();
+
+    return {
+      selectedService,
+      selectedTherapist,
+      therapistCandidates: selectedTherapist ? [selectedTherapist] : [],
+      formattedDate: selectedDate.formatted,
+      startAt,
+      hasError: Boolean(therapistError),
+    };
+  }
+
+  const selectedTherapist = {
+    name: "Prvi slobodan terapeut",
+    slug: "any",
+  };
+  const { data: serviceLinks, error: linksError } = await supabase
+    .from("therapist_services")
+    .select("therapist_id")
+    .eq("service_id", selectedService.id);
+
+  if (linksError) {
+    return {
+      ...emptyResult,
+      selectedService,
+      selectedTherapist,
+      hasError: true,
+    };
+  }
+
+  const therapistIds = [
+    ...new Set((serviceLinks ?? []).map((link) => link.therapist_id)),
+  ];
+
+  if (therapistIds.length === 0) {
+    return {
+      ...emptyResult,
+      selectedService,
+      selectedTherapist,
+    };
+  }
+
+  const { data: workingHours, error: workingHoursError } = await supabase
+    .from("working_hours")
+    .select("therapist_id, start_time, end_time")
+    .in("therapist_id", therapistIds)
+    .eq("day_of_week", selectedDate.dayOfWeek);
+
+  if (workingHoursError) {
+    return {
+      ...emptyResult,
+      selectedService,
+      selectedTherapist,
+      hasError: true,
+    };
+  }
+
+  const eligibleTherapistIds = therapistIds.filter((therapistId) =>
+    (workingHours ?? []).some(
+      (workingHour) =>
+        workingHour.therapist_id === therapistId &&
+        worksAtSelectedTime(
+          workingHour,
+          startMinutes,
+          selectedService.duration_minutes,
+        ),
+    ),
+  );
+
+  if (eligibleTherapistIds.length === 0) {
+    return {
+      ...emptyResult,
+      selectedService,
+      selectedTherapist,
+    };
+  }
+
+  const { data: therapists, error: therapistsError } = await supabase
+    .from("therapists")
+    .select("id, name, slug")
+    .in("id", eligibleTherapistIds);
+  const therapistCandidates = eligibleTherapistIds.flatMap((therapistId) => {
+    const therapist = (therapists ?? []).find(
+      (candidate) => candidate.id === therapistId,
+    );
+
+    return therapist ? [therapist] : [];
+  });
+
+  return {
+    selectedService,
+    selectedTherapist,
+    therapistCandidates,
+    formattedDate: selectedDate.formatted,
+    startAt,
+    hasError: Boolean(therapistsError),
+  };
 }
 
 export const metadata: Metadata = {
   title: "Podaci za zakazivanje | Centar za razvoj i rehabilitaciju",
-  description: "Unesite osnovne podatke za probnu potvrdu termina.",
+  description: "Unesite osnovne podatke i potvrdite izabrani termin.",
 };
 
 type DetailsPageProps = {
@@ -104,27 +390,28 @@ export default async function DetailsPage({ searchParams }: DetailsPageProps) {
     : params.therapist;
   const dateValue = Array.isArray(params.date) ? params.date[0] : params.date;
   const timeValue = Array.isArray(params.time) ? params.time[0] : params.time;
-
-  const selectedService = services.find(
-    (service) => service.slug === serviceSlug,
+  const {
+    selectedService,
+    selectedTherapist,
+    therapistCandidates,
+    formattedDate,
+    startAt,
+    hasError,
+  } = await loadBookingSelection(
+    serviceSlug,
+    therapistSlug,
+    dateValue,
+    timeValue,
   );
-  const selectedTherapist =
-    therapistSlug === "any"
-      ? { name: "Prvi slobodan terapeut", slug: "any" }
-      : therapists.find(
-          (therapist) =>
-            therapist.slug === therapistSlug &&
-            selectedService &&
-            therapist.services.includes(selectedService.slug),
-        );
-  const formattedDate = formatSelectedDate(dateValue);
+  const hasEligibleTherapist = therapistCandidates.length > 0;
   const selectionIsValid = Boolean(
     selectedService &&
       selectedTherapist &&
       dateValue &&
       formattedDate &&
       timeValue &&
-      isAvailableTime(timeValue),
+      startAt &&
+      hasEligibleTherapist,
   );
   const backHref =
     selectedService && selectedTherapist && dateValue
@@ -227,17 +514,33 @@ export default async function DetailsPage({ searchParams }: DetailsPageProps) {
 
               <DetailsForm
                 booking={{
-                  service: selectedService?.slug ?? "",
-                  therapist: selectedTherapist?.slug ?? "",
+                  serviceId: selectedService?.id ?? 0,
+                  serviceSlug: selectedService?.slug ?? "",
+                  therapistCandidates,
                   date: dateValue ?? "",
                   time: timeValue ?? "",
+                  startAt: startAt ?? "",
                 }}
               />
             </>
           ) : (
-            <div className="mt-8 rounded-3xl border border-[#397267]/12 bg-white/70 p-6 text-[#526b66] shadow-[0_12px_35px_rgba(36,60,56,0.05)]">
-              Nedostaju podaci o izabranom terminu. Vratite se na prethodni
-              korak i ponovite izbor.
+            <div
+              role={hasError ? "alert" : undefined}
+              className={`mt-8 rounded-3xl border bg-white/70 p-6 shadow-[0_12px_35px_rgba(36,60,56,0.05)] ${
+                hasError
+                  ? "border-[#b45745]/20 text-[#8f4033]"
+                  : "border-[#397267]/12 text-[#526b66]"
+              }`}
+            >
+              {hasError
+                ? "Podatke o terminu trenutno nije moguće učitati. Pokušajte ponovo kasnije."
+                : selectedService &&
+                    selectedTherapist &&
+                    formattedDate &&
+                    startAt &&
+                    !hasEligibleTherapist
+                  ? "Izabrani termin više nije dostupan. Vratite se i izaberite drugi termin."
+                  : "Nedostaju podaci o izabranom terminu. Vratite se na prethodni korak i ponovite izbor."}
             </div>
           )}
         </section>

@@ -2,12 +2,20 @@
 
 import { useRouter } from "next/navigation";
 import { useState, type ChangeEvent, type FormEvent } from "react";
+import { supabase } from "@/lib/supabase";
+
+type TherapistCandidate = {
+  id: number;
+  slug: string;
+};
 
 type BookingParameters = {
-  service: string;
-  therapist: string;
+  serviceId: number;
+  serviceSlug: string;
+  therapistCandidates: TherapistCandidate[];
   date: string;
   time: string;
+  startAt: string;
 };
 
 type DetailsFormProps = {
@@ -57,6 +65,10 @@ const initialValues: FormValues = {
   phone: "",
 };
 
+const BOOKING_CONFLICT_ERROR = "Termin je u međuvremenu rezervisan.";
+const BOOKING_CONFLICT_MESSAGE =
+  "Termin je u međuvremenu rezervisan. Izaberite drugi termin.";
+
 function getFieldError(name: FieldName, value: string) {
   const trimmedValue = value.trim();
 
@@ -82,6 +94,8 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
   const router = useRouter();
   const [values, setValues] = useState<FormValues>(initialValues);
   const [errors, setErrors] = useState<Partial<Record<FieldName, string>>>({});
+  const [submitError, setSubmitError] = useState<string>();
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   function setFieldError(name: FieldName, value: string) {
     const error = getFieldError(name, value);
@@ -114,8 +128,12 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
     setFieldError(event.target.name as FieldName, event.target.value);
   }
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
+    if (isSubmitting) {
+      return;
+    }
 
     const nextErrors: Partial<Record<FieldName, string>> = {};
 
@@ -133,16 +151,61 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
       return;
     }
 
-    const confirmationParams = new URLSearchParams({
-      service: booking.service,
-      therapist: booking.therapist,
-      date: booking.date,
-      time: booking.time,
-      parent: values.parentName.trim(),
-      child: values.childName.trim(),
-    });
+    setSubmitError(undefined);
+    setIsSubmitting(true);
 
-    router.push(`/booking/confirmation?${confirmationParams.toString()}`);
+    try {
+      let bookingConflictOccurred = false;
+
+      for (const therapist of booking.therapistCandidates) {
+        const { error } = await supabase.rpc("create_appointment", {
+          p_therapist_id: therapist.id,
+          p_service_id: booking.serviceId,
+          p_start_at: booking.startAt,
+          p_parent_name: values.parentName.trim(),
+          p_child_name: values.childName.trim(),
+          p_email: values.email.trim(),
+          p_phone: values.phone.trim(),
+        });
+
+        if (!error) {
+          const confirmationParams = new URLSearchParams({
+            service: booking.serviceSlug,
+            therapist: therapist.slug,
+            date: booking.date,
+            time: booking.time,
+          });
+
+          router.push(
+            `/booking/confirmation?${confirmationParams.toString()}`,
+          );
+          return;
+        }
+
+        if (error.message.includes(BOOKING_CONFLICT_ERROR)) {
+          bookingConflictOccurred = true;
+          continue;
+        }
+
+        setSubmitError(
+          "Termin trenutno nije moguće zakazati. Pokušajte ponovo kasnije.",
+        );
+        setIsSubmitting(false);
+        return;
+      }
+
+      setSubmitError(
+        bookingConflictOccurred
+          ? BOOKING_CONFLICT_MESSAGE
+          : "Za izabrani termin nema slobodnog terapeuta. Izaberite drugi termin.",
+      );
+    } catch {
+      setSubmitError(
+        "Termin trenutno nije moguće zakazati. Pokušajte ponovo kasnije.",
+      );
+    }
+
+    setIsSubmitting(false);
   }
 
   return (
@@ -198,16 +261,27 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
         })}
       </div>
 
+      {submitError && (
+        <div
+          role="alert"
+          className="mt-6 rounded-2xl border border-[#b45745]/20 bg-[#fff8f5] px-5 py-4 text-sm font-medium leading-6 text-[#8f4033]"
+        >
+          {submitError}
+        </div>
+      )}
+
       <div className="mt-8 flex flex-col gap-5 border-t border-[#397267]/10 pt-6 sm:flex-row sm:items-center sm:justify-between">
         <p className="max-w-md text-sm leading-6 text-[#6b807c]">
-          Sva polja su obavezna. Podaci se koriste samo za ovu probnu potvrdu i
-          ne čuvaju se.
+          Sva polja su obavezna. Podaci se koriste samo za zakazivanje ovog
+          termina.
         </p>
         <button
           type="submit"
-          className="inline-flex min-h-13 w-full cursor-pointer items-center justify-center rounded-full bg-[#397267] px-8 py-3.5 text-base font-semibold text-white shadow-[0_12px_30px_rgba(57,114,103,0.22)] transition hover:bg-[#2f6158] focus-visible:outline-3 focus-visible:outline-offset-4 focus-visible:outline-[#397267] sm:w-auto"
+          disabled={isSubmitting}
+          aria-busy={isSubmitting}
+          className="inline-flex min-h-13 w-full cursor-pointer items-center justify-center rounded-full bg-[#397267] px-8 py-3.5 text-base font-semibold text-white shadow-[0_12px_30px_rgba(57,114,103,0.22)] transition hover:bg-[#2f6158] focus-visible:outline-3 focus-visible:outline-offset-4 focus-visible:outline-[#397267] disabled:cursor-wait disabled:opacity-65 sm:w-auto"
         >
-          Potvrdi termin
+          {isSubmitting ? "Zakazivanje..." : "Potvrdi termin"}
         </button>
       </div>
     </form>
