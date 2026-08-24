@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 export default function Home() {
   return (
     <div className="relative flex min-h-screen flex-col overflow-hidden bg-[#fffaf3] text-[#243c38]">
@@ -40,12 +42,12 @@ export default function Home() {
               individualni pristup, rehabilitaciju i logopedski rad u sigurnom
               i podsticajnom okruženju.
             </p>
-            <button
-              type="button"
+            <Link
+              href="/booking"
               className="mt-10 inline-flex min-h-13 cursor-pointer items-center justify-center rounded-full bg-[#397267] px-7 py-3.5 text-base font-semibold text-white shadow-[0_12px_30px_rgba(57,114,103,0.22)] transition hover:bg-[#2f6158] focus-visible:outline-3 focus-visible:outline-offset-4 focus-visible:outline-[#397267]"
             >
               Zakaži termin
-            </button>
+            </Link>
           </div>
         </section>
       </main>
