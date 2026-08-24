@@ -2,10 +2,26 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 const services = [
-  { name: "Logopedski tretman", duration: "45 minuta" },
-  { name: "Defektološki tretman", duration: "45 minuta" },
-  { name: "Inicijalna procena", duration: "60 minuta" },
-  { name: "Kontrolni pregled", duration: "30 minuta" },
+  {
+    name: "Logopedski tretman",
+    duration: "45 minuta",
+    slug: "logopedski-tretman",
+  },
+  {
+    name: "Defektološki tretman",
+    duration: "45 minuta",
+    slug: "defektoloski-tretman",
+  },
+  {
+    name: "Inicijalna procena",
+    duration: "60 minuta",
+    slug: "inicijalna-procena",
+  },
+  {
+    name: "Kontrolni pregled",
+    duration: "30 minuta",
+    slug: "kontrolni-pregled",
+  },
 ];
 
 export const metadata: Metadata = {
@@ -68,9 +84,12 @@ export default function BookingPage() {
 
           <div className="mt-10 grid gap-4 sm:grid-cols-2 sm:gap-5">
             {services.map((service) => (
-              <button
+              <Link
                 key={service.name}
-                type="button"
+                href={{
+                  pathname: "/booking/therapists",
+                  query: { service: service.slug },
+                }}
                 className="group flex min-h-32 cursor-pointer items-center justify-between gap-5 rounded-3xl border border-[#397267]/12 bg-white/80 p-6 text-left shadow-[0_12px_35px_rgba(36,60,56,0.06)] transition hover:-translate-y-0.5 hover:border-[#397267]/30 hover:bg-white hover:shadow-[0_16px_40px_rgba(36,60,56,0.1)] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267]"
               >
                 <span>
@@ -87,7 +106,7 @@ export default function BookingPage() {
                 >
                   →
                 </span>
-              </button>
+              </Link>
             ))}
           </div>
         </section>
