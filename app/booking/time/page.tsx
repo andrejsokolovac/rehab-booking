@@ -1,46 +1,63 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { supabase } from "@/lib/supabase";
 
 const BELGRADE_TIME_ZONE = "Europe/Belgrade";
-const SLOT_DURATION_MINUTES = 45;
-const OCCUPIED_TIMES = new Set(["09:30", "11:45", "14:00"]);
+const APPOINTMENT_BUFFER_MINUTES = 15;
 
-const services = [
-  { name: "Logopedski tretman", slug: "logopedski-tretman" },
-  { name: "Defektološki tretman", slug: "defektoloski-tretman" },
-  { name: "Inicijalna procena", slug: "inicijalna-procena" },
-  { name: "Kontrolni pregled", slug: "kontrolni-pregled" },
-];
+type Service = {
+  id: number;
+  name: string;
+  slug: string;
+  duration_minutes: number;
+};
 
-const therapists = [
-  {
-    name: "Jelena Petrović",
-    slug: "jelena-petrovic",
-    services: [
-      "logopedski-tretman",
-      "inicijalna-procena",
-      "kontrolni-pregled",
-    ],
-  },
-  {
-    name: "Marko Jovanović",
-    slug: "marko-jovanovic",
-    services: [
-      "defektoloski-tretman",
-      "inicijalna-procena",
-      "kontrolni-pregled",
-    ],
-  },
-  {
-    name: "Milica Nikolić",
-    slug: "milica-nikolic",
-    services: [
-      "logopedski-tretman",
-      "defektoloski-tretman",
-      "inicijalna-procena",
-    ],
-  },
-];
+type TherapistChoice = {
+  id?: number;
+  name: string;
+  slug: string;
+};
+
+type WorkingHour = {
+  start_time: string;
+  end_time: string;
+};
+
+type TherapistWorkingHour = WorkingHour & {
+  therapist_id: number;
+};
+
+type BookedSlot = {
+  start_at: string;
+  end_at: string;
+  blocked_until: string;
+};
+
+type TherapistSchedule = {
+  therapistId: number;
+  workingHours: WorkingHour[];
+  bookedSlots: BookedSlot[];
+};
+
+type TimeAvailabilityData = {
+  selectedService: Service | null;
+  selectedTherapist: TherapistChoice | null;
+  therapistSchedules: TherapistSchedule[];
+  hasError: boolean;
+};
+
+type SelectedDate = {
+  value: string;
+  formatted: string;
+  dayOfWeek: number;
+};
+
+const calendarDateFormatter = new Intl.DateTimeFormat("en-CA", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  timeZone: BELGRADE_TIME_ZONE,
+});
 
 const dateFormatter = new Intl.DateTimeFormat("sr-Latn-RS", {
   weekday: "long",
@@ -50,44 +67,390 @@ const dateFormatter = new Intl.DateTimeFormat("sr-Latn-RS", {
   timeZone: BELGRADE_TIME_ZONE,
 });
 
-function getTimeSlots() {
-  const openingTime = 8 * 60;
-  const closingTime = 16 * 60;
-  const slots = [];
+const weekdayKeyFormatter = new Intl.DateTimeFormat("en-US", {
+  weekday: "short",
+  timeZone: BELGRADE_TIME_ZONE,
+});
 
-  for (
-    let minutes = openingTime;
-    minutes + SLOT_DURATION_MINUTES <= closingTime;
-    minutes += SLOT_DURATION_MINUTES
-  ) {
-    const hours = Math.floor(minutes / 60)
-      .toString()
-      .padStart(2, "0");
-    const minuteValue = (minutes % 60).toString().padStart(2, "0");
-    const value = `${hours}:${minuteValue}`;
+const bookedDateTimeFormatter = new Intl.DateTimeFormat("en-CA", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+  timeZone: BELGRADE_TIME_ZONE,
+});
 
-    slots.push({
-      value,
-      isOccupied: OCCUPIED_TIMES.has(value),
-    });
-  }
+const databaseDayByWeekday: Record<string, number> = {
+  Mon: 1,
+  Tue: 2,
+  Wed: 3,
+  Thu: 4,
+  Fri: 5,
+  Sat: 6,
+  Sun: 7,
+};
 
-  return slots;
+function getCalendarParts(date: Date) {
+  const parts = calendarDateFormatter.formatToParts(date);
+
+  return {
+    year: parts.find((part) => part.type === "year")?.value ?? "",
+    month: parts.find((part) => part.type === "month")?.value ?? "",
+    day: parts.find((part) => part.type === "day")?.value ?? "",
+  };
 }
 
-function formatSelectedDate(value?: string) {
-  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return undefined;
+function getSelectedDate(value?: string): SelectedDate | null {
+  const match = value?.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+  if (!match) {
+    return null;
   }
 
-  const date = new Date(`${value}T12:00:00Z`);
+  const [, year, month, day] = match;
+  const date = new Date(
+    Date.UTC(Number(year), Number(month) - 1, Number(day), 12),
+  );
+  const calendarParts = getCalendarParts(date);
+  const normalizedValue = `${calendarParts.year}-${calendarParts.month}-${calendarParts.day}`;
 
-  if (Number.isNaN(date.getTime())) {
-    return undefined;
+  if (normalizedValue !== value) {
+    return null;
   }
 
   const formatted = dateFormatter.format(date);
-  return formatted.charAt(0).toLocaleUpperCase("sr-Latn-RS") + formatted.slice(1);
+
+  return {
+    value,
+    formatted:
+      formatted.charAt(0).toLocaleUpperCase("sr-Latn-RS") + formatted.slice(1),
+    dayOfWeek: databaseDayByWeekday[weekdayKeyFormatter.format(date)],
+  };
+}
+
+function parseTime(value: string) {
+  const match = value.match(/^(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const seconds = Number(match[3] ?? 0);
+
+  if (hours > 23 || minutes > 59 || seconds !== 0) {
+    return null;
+  }
+
+  return hours * 60 + minutes;
+}
+
+function formatTime(totalMinutes: number) {
+  const hours = Math.floor(totalMinutes / 60)
+    .toString()
+    .padStart(2, "0");
+  const minutes = (totalMinutes % 60).toString().padStart(2, "0");
+
+  return `${hours}:${minutes}`;
+}
+
+function getLocalCalendarTimestamp(dateValue: string, totalMinutes: number) {
+  const match = dateValue.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const [, year, month, day] = match;
+
+  return (
+    Date.UTC(Number(year), Number(month) - 1, Number(day)) +
+    totalMinutes * 60_000
+  );
+}
+
+function getBookedCalendarTimestamp(value: string) {
+  const localTimestampMatch = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/,
+  );
+
+  if (localTimestampMatch) {
+    const [, year, month, day, hour, minute, second = "0"] =
+      localTimestampMatch;
+
+    return Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second),
+    );
+  }
+
+  const instant = new Date(value);
+
+  if (Number.isNaN(instant.getTime())) {
+    return null;
+  }
+
+  const parts = bookedDateTimeFormatter.formatToParts(instant);
+  const values = Object.fromEntries(
+    parts.map((part) => [part.type, part.value]),
+  );
+
+  return Date.UTC(
+    Number(values.year),
+    Number(values.month) - 1,
+    Number(values.day),
+    Number(values.hour),
+    Number(values.minute),
+    Number(values.second),
+  );
+}
+
+function conflictsWithBookedSlot(
+  start: number,
+  dateValue: string,
+  durationMinutes: number,
+  bookedSlots: BookedSlot[],
+) {
+  const candidateStart = getLocalCalendarTimestamp(dateValue, start);
+
+  if (candidateStart === null) {
+    return true;
+  }
+
+  const candidateBlockedUntil =
+    candidateStart +
+    (durationMinutes + APPOINTMENT_BUFFER_MINUTES) * 60_000;
+
+  return bookedSlots.some((bookedSlot) => {
+    const bookedStart = getBookedCalendarTimestamp(bookedSlot.start_at);
+    const bookedBlockedUntil = getBookedCalendarTimestamp(
+      bookedSlot.blocked_until,
+    );
+
+    if (bookedStart === null || bookedBlockedUntil === null) {
+      return true;
+    }
+
+    return (
+      candidateStart < bookedBlockedUntil &&
+      candidateBlockedUntil > bookedStart
+    );
+  });
+}
+
+function generateTimeSlots(
+  therapistSchedules: TherapistSchedule[],
+  durationMinutes: number,
+  dateValue?: string,
+) {
+  if (
+    !dateValue ||
+    !Number.isInteger(durationMinutes) ||
+    durationMinutes <= 0
+  ) {
+    return [];
+  }
+
+  const starts = new Set<number>();
+  const startIntervalMinutes =
+    durationMinutes + APPOINTMENT_BUFFER_MINUTES;
+
+  therapistSchedules.forEach((schedule) => {
+    schedule.workingHours.forEach((workingHour) => {
+      const intervalStart = parseTime(workingHour.start_time);
+      const intervalEnd = parseTime(workingHour.end_time);
+
+      if (
+        intervalStart === null ||
+        intervalEnd === null ||
+        intervalEnd <= intervalStart
+      ) {
+        return;
+      }
+
+      for (
+        let start = intervalStart;
+        start + durationMinutes <= intervalEnd;
+        start += startIntervalMinutes
+      ) {
+        if (
+          !conflictsWithBookedSlot(
+            start,
+            dateValue,
+            durationMinutes,
+            schedule.bookedSlots,
+          )
+        ) {
+          starts.add(start);
+        }
+      }
+    });
+  });
+
+  return [...starts].sort((first, second) => first - second).map(formatTime);
+}
+
+async function loadTimeAvailability(
+  serviceSlug?: string,
+  therapistSlug?: string,
+  selectedDate?: SelectedDate | null,
+): Promise<TimeAvailabilityData> {
+  const emptyResult = {
+    selectedService: null,
+    selectedTherapist: null,
+    therapistSchedules: [],
+    hasError: false,
+  };
+
+  if (!serviceSlug || !therapistSlug || !selectedDate) {
+    return emptyResult;
+  }
+
+  const { data: selectedService, error: serviceError } = await supabase
+    .from("services")
+    .select("id, name, slug, duration_minutes")
+    .eq("slug", serviceSlug)
+    .maybeSingle();
+
+  if (serviceError) {
+    return { ...emptyResult, hasError: true };
+  }
+
+  if (!selectedService) {
+    return emptyResult;
+  }
+
+  if (therapistSlug === "any") {
+    const selectedTherapist = {
+      name: "Prvi slobodan terapeut",
+      slug: "any",
+    };
+    const { data: serviceLinks, error: linksError } = await supabase
+      .from("therapist_services")
+      .select("therapist_id")
+      .eq("service_id", selectedService.id);
+
+    if (linksError) {
+      return {
+        selectedService,
+        selectedTherapist,
+        therapistSchedules: [],
+        hasError: true,
+      };
+    }
+
+    const therapistIds = [
+      ...new Set((serviceLinks ?? []).map((link) => link.therapist_id)),
+    ];
+
+    if (therapistIds.length === 0) {
+      return {
+        selectedService,
+        selectedTherapist,
+        therapistSchedules: [],
+        hasError: false,
+      };
+    }
+
+    const workingHoursRequest = supabase
+      .from("working_hours")
+      .select("therapist_id, start_time, end_time")
+      .in("therapist_id", therapistIds)
+      .eq("day_of_week", selectedDate.dayOfWeek)
+      .order("start_time", { ascending: true });
+
+    const bookedSlotsRequest = Promise.all(
+      therapistIds.map((therapistId) =>
+        supabase.rpc("get_booked_slots", {
+          p_therapist_id: therapistId,
+          p_date: selectedDate.value,
+        }),
+      ),
+    );
+
+    const [workingHoursResult, bookedSlotsResults] = await Promise.all([
+      workingHoursRequest,
+      bookedSlotsRequest,
+    ]);
+
+    const workingHours =
+      (workingHoursResult.data as TherapistWorkingHour[] | null) ?? [];
+    const hasBookedSlotsError = bookedSlotsResults.some(
+      (result) => result.error,
+    );
+    const therapistSchedules = therapistIds.map((therapistId, index) => ({
+      therapistId,
+      workingHours: workingHours.filter(
+        (workingHour) => workingHour.therapist_id === therapistId,
+      ),
+      bookedSlots: (bookedSlotsResults[index].data ?? []) as BookedSlot[],
+    }));
+
+    return {
+      selectedService,
+      selectedTherapist,
+      therapistSchedules,
+      hasError: Boolean(workingHoursResult.error || hasBookedSlotsError),
+    };
+  }
+
+  const { data: selectedTherapist, error: therapistError } = await supabase
+    .from("therapists")
+    .select("id, name, slug")
+    .eq("slug", therapistSlug)
+    .maybeSingle();
+
+  if (therapistError) {
+    return {
+      selectedService,
+      selectedTherapist: null,
+      therapistSchedules: [],
+      hasError: true,
+    };
+  }
+
+  if (!selectedTherapist) {
+    return {
+      selectedService,
+      selectedTherapist: null,
+      therapistSchedules: [],
+      hasError: false,
+    };
+  }
+
+  const [workingHoursResult, bookedSlotsResult] = await Promise.all([
+    supabase
+      .from("working_hours")
+      .select("start_time, end_time")
+      .eq("therapist_id", selectedTherapist.id)
+      .eq("day_of_week", selectedDate.dayOfWeek)
+      .order("start_time", { ascending: true }),
+    supabase.rpc("get_booked_slots", {
+      p_therapist_id: selectedTherapist.id,
+      p_date: selectedDate.value,
+    }),
+  ]);
+
+  return {
+    selectedService,
+    selectedTherapist,
+    therapistSchedules: [
+      {
+        therapistId: selectedTherapist.id,
+        workingHours: workingHoursResult.data ?? [],
+        bookedSlots: (bookedSlotsResult.data ?? []) as BookedSlot[],
+      },
+    ],
+    hasError: Boolean(workingHoursResult.error || bookedSlotsResult.error),
+  };
 }
 
 export const metadata: Metadata = {
@@ -114,35 +477,35 @@ export default async function TimePage({ searchParams }: TimePageProps) {
     : params.therapist;
   const dateValue = Array.isArray(params.date) ? params.date[0] : params.date;
   const timeValue = Array.isArray(params.time) ? params.time[0] : params.time;
-
-  const selectedService = services.find(
-    (service) => service.slug === serviceSlug,
+  const selectedDate = getSelectedDate(dateValue);
+  const {
+    selectedService,
+    selectedTherapist,
+    therapistSchedules,
+    hasError,
+  } =
+    await loadTimeAvailability(
+      serviceSlug,
+      therapistSlug,
+      selectedDate,
+    );
+  const timeSlots = generateTimeSlots(
+    therapistSchedules,
+    selectedService?.duration_minutes ?? 0,
+    selectedDate?.value,
   );
-  const selectedTherapist =
-    therapistSlug === "any"
-      ? { name: "Prvi slobodan terapeut", slug: "any" }
-      : therapists.find(
-          (therapist) =>
-            therapist.slug === therapistSlug &&
-            selectedService &&
-            therapist.services.includes(selectedService.slug),
-        );
-  const formattedDate = formatSelectedDate(dateValue);
-  const timeSlots = getTimeSlots();
-  const selectedTime = timeSlots.find(
-    (slot) => !slot.isOccupied && slot.value === timeValue,
-  );
+  const selectedTime = timeSlots.find((time) => time === timeValue);
   const selectionIsValid = Boolean(
-    selectedService && selectedTherapist && formattedDate && dateValue,
+    selectedService && selectedTherapist && selectedDate,
   );
   const backHref =
-    selectedService && selectedTherapist
+    selectedService && selectedTherapist && selectedDate
       ? {
           pathname: "/booking/date",
           query: {
             service: selectedService.slug,
             therapist: selectedTherapist.slug,
-            date: dateValue,
+            date: selectedDate.value,
           },
         }
       : "/booking";
@@ -220,100 +583,104 @@ export default async function TimePage({ searchParams }: TimePageProps) {
                     Datum
                   </p>
                   <p className="mt-2 font-semibold text-[#243c38]">
-                    {formattedDate}
+                    {selectedDate?.formatted}
                   </p>
                 </div>
               </div>
 
-              <div className="mt-12 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-                <h2 className="text-sm font-semibold tracking-[0.12em] text-[#526b66] uppercase">
-                  Dostupni termini
-                </h2>
-                <p className="text-sm text-[#6b807c]">
-                  Trajanje termina je 45 minuta
-                </p>
-              </div>
-
-              <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-                {timeSlots.map((slot) => {
-                  const isSelected =
-                    !slot.isOccupied && timeValue === slot.value;
-
-                  if (slot.isOccupied) {
-                    return (
-                      <button
-                        key={slot.value}
-                        type="button"
-                        disabled
-                        className="flex min-h-28 cursor-not-allowed flex-col items-center justify-center rounded-3xl border border-[#243c38]/8 bg-[#f1eee8]/80 px-4 py-5 text-[#83908d] opacity-75"
-                      >
-                        <span className="text-2xl font-semibold">
-                          {slot.value}
-                        </span>
-                        <span className="mt-2 text-xs font-semibold uppercase">
-                          Zauzeto
-                        </span>
-                      </button>
-                    );
-                  }
-
-                  return (
-                    <Link
-                      key={slot.value}
-                      href={{
-                        pathname: "/booking/time",
-                        query: {
-                          service: selectedService?.slug,
-                          therapist: selectedTherapist?.slug,
-                          date: dateValue,
-                          time: slot.value,
-                        },
-                      }}
-                      replace
-                      aria-current={isSelected ? "time" : undefined}
-                      className={`flex min-h-28 flex-col items-center justify-center rounded-3xl border px-4 py-5 shadow-[0_10px_28px_rgba(36,60,56,0.05)] transition hover:-translate-y-0.5 focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267] ${
-                        isSelected
-                          ? "border-[#397267] bg-[#397267] text-white shadow-[0_14px_32px_rgba(57,114,103,0.2)]"
-                          : "border-[#397267]/12 bg-white/80 text-[#243c38] hover:border-[#397267]/30 hover:bg-white"
-                      }`}
-                    >
-                      <span className="text-2xl font-semibold">
-                        {slot.value}
-                      </span>
-                      <span
-                        className={`mt-2 text-xs font-semibold uppercase ${isSelected ? "text-white" : "text-[#397267]"}`}
-                      >
-                        {isSelected ? "Izabrano" : "Slobodno"}
-                      </span>
-                    </Link>
-                  );
-                })}
-              </div>
-
-              {selectedTime && (
-                <div className="mt-8 flex justify-center sm:justify-end">
-                  <Link
-                    href={{
-                      pathname: "/booking/details",
-                      query: {
-                        service: selectedService?.slug,
-                        therapist: selectedTherapist?.slug,
-                        date: dateValue,
-                        time: selectedTime.value,
-                      },
-                    }}
-                    className="inline-flex min-h-13 w-full items-center justify-center gap-2 rounded-full bg-[#397267] px-8 py-3.5 text-base font-semibold text-white shadow-[0_12px_30px_rgba(57,114,103,0.22)] transition hover:bg-[#2f6158] focus-visible:outline-3 focus-visible:outline-offset-4 focus-visible:outline-[#397267] sm:w-auto"
-                  >
-                    Nastavi
-                    <span aria-hidden="true">→</span>
-                  </Link>
+              {hasError ? (
+                <div
+                  role="alert"
+                  className="mt-10 rounded-3xl border border-[#b45745]/20 bg-white/75 p-6 text-[#8f4033] shadow-[0_12px_35px_rgba(36,60,56,0.05)]"
+                >
+                  Termine trenutno nije moguće učitati. Pokušajte ponovo
+                  kasnije.
                 </div>
+              ) : timeSlots.length === 0 ? (
+                <div className="mt-10 rounded-3xl border border-[#397267]/12 bg-white/75 p-6 text-[#526b66] shadow-[0_12px_35px_rgba(36,60,56,0.05)]">
+                  Za izabrani datum nema dostupnih termina.
+                </div>
+              ) : (
+                <>
+                  <div className="mt-12 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                    <h2 className="text-sm font-semibold tracking-[0.12em] text-[#526b66] uppercase">
+                      Dostupni termini
+                    </h2>
+                    <p className="text-sm text-[#6b807c]">
+                      Trajanje termina je {selectedService?.duration_minutes}{" "}
+                      minuta
+                    </p>
+                  </div>
+
+                  <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+                    {timeSlots.map((time) => {
+                      const isSelected = selectedTime === time;
+
+                      return (
+                        <Link
+                          key={time}
+                          href={{
+                            pathname: "/booking/time",
+                            query: {
+                              service: selectedService?.slug,
+                              therapist: selectedTherapist?.slug,
+                              date: selectedDate?.value,
+                              time,
+                            },
+                          }}
+                          replace
+                          aria-current={isSelected ? "time" : undefined}
+                          className={`flex min-h-28 flex-col items-center justify-center rounded-3xl border px-4 py-5 shadow-[0_10px_28px_rgba(36,60,56,0.05)] transition hover:-translate-y-0.5 focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267] ${
+                            isSelected
+                              ? "border-[#397267] bg-[#397267] text-white shadow-[0_14px_32px_rgba(57,114,103,0.2)]"
+                              : "border-[#397267]/12 bg-white/80 text-[#243c38] hover:border-[#397267]/30 hover:bg-white"
+                          }`}
+                        >
+                          <span className="text-2xl font-semibold">{time}</span>
+                          <span
+                            className={`mt-2 text-xs font-semibold uppercase ${isSelected ? "text-white" : "text-[#397267]"}`}
+                          >
+                            {isSelected ? "Izabrano" : "Slobodno"}
+                          </span>
+                        </Link>
+                      );
+                    })}
+                  </div>
+
+                  {selectedTime && (
+                    <div className="mt-8 flex justify-center sm:justify-end">
+                      <Link
+                        href={{
+                          pathname: "/booking/details",
+                          query: {
+                            service: selectedService?.slug,
+                            therapist: selectedTherapist?.slug,
+                            date: selectedDate?.value,
+                            time: selectedTime,
+                          },
+                        }}
+                        className="inline-flex min-h-13 w-full items-center justify-center gap-2 rounded-full bg-[#397267] px-8 py-3.5 text-base font-semibold text-white shadow-[0_12px_30px_rgba(57,114,103,0.22)] transition hover:bg-[#2f6158] focus-visible:outline-3 focus-visible:outline-offset-4 focus-visible:outline-[#397267] sm:w-auto"
+                      >
+                        Nastavi
+                        <span aria-hidden="true">→</span>
+                      </Link>
+                    </div>
+                  )}
+                </>
               )}
             </>
           ) : (
-            <div className="mt-8 rounded-3xl border border-[#397267]/12 bg-white/70 p-6 text-[#526b66] shadow-[0_12px_35px_rgba(36,60,56,0.05)]">
-              Nedostaju podaci o usluzi, terapeutu ili datumu. Vratite se na
-              prethodni korak i ponovite izbor.
+            <div
+              role={hasError ? "alert" : undefined}
+              className={`mt-8 rounded-3xl border bg-white/70 p-6 shadow-[0_12px_35px_rgba(36,60,56,0.05)] ${
+                hasError
+                  ? "border-[#b45745]/20 text-[#8f4033]"
+                  : "border-[#397267]/12 text-[#526b66]"
+              }`}
+            >
+              {hasError
+                ? "Termine trenutno nije moguće učitati. Pokušajte ponovo kasnije."
+                : "Nedostaju podaci o usluzi, terapeutu ili datumu. Vratite se na prethodni korak i ponovite izbor."}
             </div>
           )}
         </section>
