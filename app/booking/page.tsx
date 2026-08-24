@@ -1,35 +1,18 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-
-const services = [
-  {
-    name: "Logopedski tretman",
-    duration: "45 minuta",
-    slug: "logopedski-tretman",
-  },
-  {
-    name: "Defektološki tretman",
-    duration: "45 minuta",
-    slug: "defektoloski-tretman",
-  },
-  {
-    name: "Inicijalna procena",
-    duration: "60 minuta",
-    slug: "inicijalna-procena",
-  },
-  {
-    name: "Kontrolni pregled",
-    duration: "30 minuta",
-    slug: "kontrolni-pregled",
-  },
-];
+import { supabase } from "@/lib/supabase";
 
 export const metadata: Metadata = {
   title: "Zakažite termin | Centar za razvoj i rehabilitaciju",
   description: "Izaberite vrstu usluge za željeni termin.",
 };
 
-export default function BookingPage() {
+export default async function BookingPage() {
+  const { data: services, error } = await supabase
+    .from("services")
+    .select("id, name, slug, duration_minutes")
+    .order("id", { ascending: true });
+
   return (
     <div className="relative flex min-h-screen flex-col overflow-hidden bg-[#fffaf3] text-[#243c38]">
       <div
@@ -82,33 +65,46 @@ export default function BookingPage() {
             </p>
           </div>
 
-          <div className="mt-10 grid gap-4 sm:grid-cols-2 sm:gap-5">
-            {services.map((service) => (
-              <Link
-                key={service.name}
-                href={{
-                  pathname: "/booking/therapists",
-                  query: { service: service.slug },
-                }}
-                className="group flex min-h-32 cursor-pointer items-center justify-between gap-5 rounded-3xl border border-[#397267]/12 bg-white/80 p-6 text-left shadow-[0_12px_35px_rgba(36,60,56,0.06)] transition hover:-translate-y-0.5 hover:border-[#397267]/30 hover:bg-white hover:shadow-[0_16px_40px_rgba(36,60,56,0.1)] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267]"
-              >
-                <span>
-                  <span className="block text-lg font-semibold text-[#243c38]">
-                    {service.name}
-                  </span>
-                  <span className="mt-2 block text-sm font-medium text-[#6b807c]">
-                    {service.duration}
-                  </span>
-                </span>
-                <span
-                  aria-hidden="true"
-                  className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#e2f0e7] text-lg text-[#397267] transition group-hover:bg-[#397267] group-hover:text-white"
+          {error ? (
+            <div
+              role="alert"
+              className="mt-10 rounded-3xl border border-[#b45745]/20 bg-white/75 p-6 text-[#8f4033] shadow-[0_12px_35px_rgba(36,60,56,0.05)]"
+            >
+              Usluge trenutno nije moguće učitati. Pokušajte ponovo kasnije.
+            </div>
+          ) : !services || services.length === 0 ? (
+            <div className="mt-10 rounded-3xl border border-[#397267]/12 bg-white/75 p-6 text-[#526b66] shadow-[0_12px_35px_rgba(36,60,56,0.05)]">
+              Trenutno nema dostupnih usluga.
+            </div>
+          ) : (
+            <div className="mt-10 grid gap-4 sm:grid-cols-2 sm:gap-5">
+              {services.map((service) => (
+                <Link
+                  key={service.id}
+                  href={{
+                    pathname: "/booking/therapists",
+                    query: { service: service.slug },
+                  }}
+                  className="group flex min-h-32 cursor-pointer items-center justify-between gap-5 rounded-3xl border border-[#397267]/12 bg-white/80 p-6 text-left shadow-[0_12px_35px_rgba(36,60,56,0.06)] transition hover:-translate-y-0.5 hover:border-[#397267]/30 hover:bg-white hover:shadow-[0_16px_40px_rgba(36,60,56,0.1)] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267]"
                 >
-                  →
-                </span>
-              </Link>
-            ))}
-          </div>
+                  <span>
+                    <span className="block text-lg font-semibold text-[#243c38]">
+                      {service.name}
+                    </span>
+                    <span className="mt-2 block text-sm font-medium text-[#6b807c]">
+                      {service.duration_minutes} minuta
+                    </span>
+                  </span>
+                  <span
+                    aria-hidden="true"
+                    className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#e2f0e7] text-lg text-[#397267] transition group-hover:bg-[#397267] group-hover:text-white"
+                  >
+                    →
+                  </span>
+                </Link>
+              ))}
+            </div>
+          )}
         </section>
       </main>
     </div>

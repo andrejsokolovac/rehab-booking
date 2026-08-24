@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import DetailsForm from "./details-form";
 
 const BELGRADE_TIME_ZONE = "Europe/Belgrade";
-const SLOT_DURATION_MINUTES = 45;
 const OCCUPIED_TIMES = new Set(["09:30", "11:45", "14:00"]);
 
 const services = [
@@ -50,31 +50,6 @@ const dateFormatter = new Intl.DateTimeFormat("sr-Latn-RS", {
   timeZone: BELGRADE_TIME_ZONE,
 });
 
-function getTimeSlots() {
-  const openingTime = 8 * 60;
-  const closingTime = 16 * 60;
-  const slots = [];
-
-  for (
-    let minutes = openingTime;
-    minutes + SLOT_DURATION_MINUTES <= closingTime;
-    minutes += SLOT_DURATION_MINUTES
-  ) {
-    const hours = Math.floor(minutes / 60)
-      .toString()
-      .padStart(2, "0");
-    const minuteValue = (minutes % 60).toString().padStart(2, "0");
-    const value = `${hours}:${minuteValue}`;
-
-    slots.push({
-      value,
-      isOccupied: OCCUPIED_TIMES.has(value),
-    });
-  }
-
-  return slots;
-}
-
 function formatSelectedDate(value?: string) {
   if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return undefined;
@@ -90,12 +65,27 @@ function formatSelectedDate(value?: string) {
   return formatted.charAt(0).toLocaleUpperCase("sr-Latn-RS") + formatted.slice(1);
 }
 
+function isAvailableTime(value?: string) {
+  if (!value || !/^\d{2}:\d{2}$/.test(value) || OCCUPIED_TIMES.has(value)) {
+    return false;
+  }
+
+  const [hours, minutes] = value.split(":").map(Number);
+  const totalMinutes = hours * 60 + minutes;
+
+  return (
+    totalMinutes >= 8 * 60 &&
+    totalMinutes + 45 <= 16 * 60 &&
+    (totalMinutes - 8 * 60) % 45 === 0
+  );
+}
+
 export const metadata: Metadata = {
-  title: "Izaberite termin | Centar za razvoj i rehabilitaciju",
-  description: "Izaberite raspoloživo vreme za željeni termin.",
+  title: "Podaci za zakazivanje | Centar za razvoj i rehabilitaciju",
+  description: "Unesite osnovne podatke za probnu potvrdu termina.",
 };
 
-type TimePageProps = {
+type DetailsPageProps = {
   searchParams: Promise<{
     service?: string | string[];
     therapist?: string | string[];
@@ -104,7 +94,7 @@ type TimePageProps = {
   }>;
 };
 
-export default async function TimePage({ searchParams }: TimePageProps) {
+export default async function DetailsPage({ searchParams }: DetailsPageProps) {
   const params = await searchParams;
   const serviceSlug = Array.isArray(params.service)
     ? params.service[0]
@@ -128,21 +118,23 @@ export default async function TimePage({ searchParams }: TimePageProps) {
             therapist.services.includes(selectedService.slug),
         );
   const formattedDate = formatSelectedDate(dateValue);
-  const timeSlots = getTimeSlots();
-  const selectedTime = timeSlots.find(
-    (slot) => !slot.isOccupied && slot.value === timeValue,
-  );
   const selectionIsValid = Boolean(
-    selectedService && selectedTherapist && formattedDate && dateValue,
+    selectedService &&
+      selectedTherapist &&
+      dateValue &&
+      formattedDate &&
+      timeValue &&
+      isAvailableTime(timeValue),
   );
   const backHref =
-    selectedService && selectedTherapist
+    selectedService && selectedTherapist && dateValue
       ? {
-          pathname: "/booking/date",
+          pathname: "/booking/time",
           query: {
             service: selectedService.slug,
             therapist: selectedTherapist.slug,
             date: dateValue,
+            time: timeValue,
           },
         }
       : "/booking";
@@ -180,7 +172,7 @@ export default async function TimePage({ searchParams }: TimePageProps) {
             className="inline-flex items-center gap-2 rounded-full px-3 py-2 text-sm font-semibold text-[#397267] transition hover:bg-white/70 focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-[#397267] sm:px-4"
           >
             <span aria-hidden="true">←</span>
-            Nazad na izbor datuma
+            Nazad na izbor termina
           </Link>
         </div>
       </header>
@@ -189,16 +181,16 @@ export default async function TimePage({ searchParams }: TimePageProps) {
         <section className="mx-auto w-full max-w-5xl px-6 py-16 sm:px-8 sm:py-24 lg:px-10">
           <div className="text-center sm:text-left">
             <p className="mb-4 text-sm font-semibold tracking-[0.12em] text-[#397267] uppercase">
-              Četvrti korak
+              Peti korak
             </p>
             <h1 className="text-4xl leading-tight font-semibold tracking-[-0.035em] text-[#243c38] sm:text-5xl">
-              Izaberite termin
+              Podaci za zakazivanje
             </h1>
           </div>
 
           {selectionIsValid ? (
             <>
-              <div className="mt-8 grid gap-3 rounded-3xl border border-[#397267]/12 bg-white/70 p-5 shadow-[0_12px_35px_rgba(36,60,56,0.05)] sm:grid-cols-3 sm:p-6">
+              <div className="mt-8 grid gap-3 rounded-3xl border border-[#397267]/12 bg-white/70 p-5 shadow-[0_12px_35px_rgba(36,60,56,0.05)] sm:grid-cols-2 lg:grid-cols-4 sm:p-6">
                 <div>
                   <p className="text-xs font-semibold tracking-[0.12em] text-[#6b807c] uppercase">
                     Usluga
@@ -207,7 +199,7 @@ export default async function TimePage({ searchParams }: TimePageProps) {
                     {selectedService?.name}
                   </p>
                 </div>
-                <div className="border-t border-[#397267]/10 pt-3 sm:border-t-0 sm:border-l sm:pt-0 sm:pl-6">
+                <div className="border-t border-[#397267]/10 pt-3 sm:border-t-0 sm:border-l sm:pt-0 sm:pl-5">
                   <p className="text-xs font-semibold tracking-[0.12em] text-[#6b807c] uppercase">
                     Terapeut
                   </p>
@@ -215,7 +207,7 @@ export default async function TimePage({ searchParams }: TimePageProps) {
                     {selectedTherapist?.name}
                   </p>
                 </div>
-                <div className="border-t border-[#397267]/10 pt-3 sm:border-t-0 sm:border-l sm:pt-0 sm:pl-6">
+                <div className="border-t border-[#397267]/10 pt-3 sm:border-l sm:pt-3 sm:pl-5 lg:border-t-0 lg:pt-0">
                   <p className="text-xs font-semibold tracking-[0.12em] text-[#6b807c] uppercase">
                     Datum
                   </p>
@@ -223,97 +215,29 @@ export default async function TimePage({ searchParams }: TimePageProps) {
                     {formattedDate}
                   </p>
                 </div>
-              </div>
-
-              <div className="mt-12 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-                <h2 className="text-sm font-semibold tracking-[0.12em] text-[#526b66] uppercase">
-                  Dostupni termini
-                </h2>
-                <p className="text-sm text-[#6b807c]">
-                  Trajanje termina je 45 minuta
-                </p>
-              </div>
-
-              <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-                {timeSlots.map((slot) => {
-                  const isSelected =
-                    !slot.isOccupied && timeValue === slot.value;
-
-                  if (slot.isOccupied) {
-                    return (
-                      <button
-                        key={slot.value}
-                        type="button"
-                        disabled
-                        className="flex min-h-28 cursor-not-allowed flex-col items-center justify-center rounded-3xl border border-[#243c38]/8 bg-[#f1eee8]/80 px-4 py-5 text-[#83908d] opacity-75"
-                      >
-                        <span className="text-2xl font-semibold">
-                          {slot.value}
-                        </span>
-                        <span className="mt-2 text-xs font-semibold uppercase">
-                          Zauzeto
-                        </span>
-                      </button>
-                    );
-                  }
-
-                  return (
-                    <Link
-                      key={slot.value}
-                      href={{
-                        pathname: "/booking/time",
-                        query: {
-                          service: selectedService?.slug,
-                          therapist: selectedTherapist?.slug,
-                          date: dateValue,
-                          time: slot.value,
-                        },
-                      }}
-                      replace
-                      aria-current={isSelected ? "time" : undefined}
-                      className={`flex min-h-28 flex-col items-center justify-center rounded-3xl border px-4 py-5 shadow-[0_10px_28px_rgba(36,60,56,0.05)] transition hover:-translate-y-0.5 focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267] ${
-                        isSelected
-                          ? "border-[#397267] bg-[#397267] text-white shadow-[0_14px_32px_rgba(57,114,103,0.2)]"
-                          : "border-[#397267]/12 bg-white/80 text-[#243c38] hover:border-[#397267]/30 hover:bg-white"
-                      }`}
-                    >
-                      <span className="text-2xl font-semibold">
-                        {slot.value}
-                      </span>
-                      <span
-                        className={`mt-2 text-xs font-semibold uppercase ${isSelected ? "text-white" : "text-[#397267]"}`}
-                      >
-                        {isSelected ? "Izabrano" : "Slobodno"}
-                      </span>
-                    </Link>
-                  );
-                })}
-              </div>
-
-              {selectedTime && (
-                <div className="mt-8 flex justify-center sm:justify-end">
-                  <Link
-                    href={{
-                      pathname: "/booking/details",
-                      query: {
-                        service: selectedService?.slug,
-                        therapist: selectedTherapist?.slug,
-                        date: dateValue,
-                        time: selectedTime.value,
-                      },
-                    }}
-                    className="inline-flex min-h-13 w-full items-center justify-center gap-2 rounded-full bg-[#397267] px-8 py-3.5 text-base font-semibold text-white shadow-[0_12px_30px_rgba(57,114,103,0.22)] transition hover:bg-[#2f6158] focus-visible:outline-3 focus-visible:outline-offset-4 focus-visible:outline-[#397267] sm:w-auto"
-                  >
-                    Nastavi
-                    <span aria-hidden="true">→</span>
-                  </Link>
+                <div className="border-t border-[#397267]/10 pt-3 sm:border-l sm:pt-3 sm:pl-5 lg:border-t-0 lg:pt-0">
+                  <p className="text-xs font-semibold tracking-[0.12em] text-[#6b807c] uppercase">
+                    Vreme
+                  </p>
+                  <p className="mt-2 font-semibold text-[#243c38]">
+                    {timeValue}
+                  </p>
                 </div>
-              )}
+              </div>
+
+              <DetailsForm
+                booking={{
+                  service: selectedService?.slug ?? "",
+                  therapist: selectedTherapist?.slug ?? "",
+                  date: dateValue ?? "",
+                  time: timeValue ?? "",
+                }}
+              />
             </>
           ) : (
             <div className="mt-8 rounded-3xl border border-[#397267]/12 bg-white/70 p-6 text-[#526b66] shadow-[0_12px_35px_rgba(36,60,56,0.05)]">
-              Nedostaju podaci o usluzi, terapeutu ili datumu. Vratite se na
-              prethodni korak i ponovite izbor.
+              Nedostaju podaci o izabranom terminu. Vratite se na prethodni
+              korak i ponovite izbor.
             </div>
           )}
         </section>
