@@ -1,10 +1,17 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import {
+  isTimeAvailableForSchedule,
+  parseTime,
+  type BookedSlot,
+  type TherapistSchedule,
+  type UnavailabilityBlock,
+  type WorkingHour,
+} from "@/lib/booking-availability";
 import { supabase } from "@/lib/supabase";
 import DetailsForm from "./details-form";
 
 const BELGRADE_TIME_ZONE = "Europe/Belgrade";
-const APPOINTMENT_BUFFER_MINUTES = 15;
 
 type Service = {
   id: number;
@@ -19,10 +26,8 @@ type Therapist = {
   slug: string;
 };
 
-type WorkingHour = {
+type TherapistWorkingHour = WorkingHour & {
   therapist_id: number;
-  start_time: string;
-  end_time: string;
 };
 
 type SelectedDate = {
@@ -100,24 +105,6 @@ function getSelectedDate(value?: string): SelectedDate | null {
       formatted.charAt(0).toLocaleUpperCase("sr-Latn-RS") + formatted.slice(1),
     dayOfWeek: databaseDayByWeekday[weekdayFormatter.format(date)],
   };
-}
-
-function parseTime(value?: string) {
-  const match = value?.match(/^(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/);
-
-  if (!match) {
-    return null;
-  }
-
-  const hours = Number(match[1]);
-  const minutes = Number(match[2]);
-  const seconds = Number(match[3] ?? 0);
-
-  if (hours > 23 || minutes > 59 || seconds !== 0) {
-    return null;
-  }
-
-  return hours * 60 + minutes;
 }
 
 function getZonedParts(date: Date) {
@@ -199,27 +186,6 @@ function toBelgradeInstant(dateValue?: string, timeValue?: string) {
   return instant.toISOString();
 }
 
-function worksAtSelectedTime(
-  workingHour: WorkingHour,
-  startMinutes: number,
-  durationMinutes: number,
-) {
-  const intervalStart = parseTime(workingHour.start_time);
-  const intervalEnd = parseTime(workingHour.end_time);
-
-  if (intervalStart === null || intervalEnd === null) {
-    return false;
-  }
-
-  return (
-    startMinutes >= intervalStart &&
-    startMinutes + durationMinutes <= intervalEnd &&
-    (startMinutes - intervalStart) %
-      (durationMinutes + APPOINTMENT_BUFFER_MINUTES) ===
-      0
-  );
-}
-
 async function loadBookingSelection(
   serviceSlug?: string,
   therapistSlug?: string,
@@ -241,6 +207,7 @@ async function loadBookingSelection(
   if (
     !serviceSlug ||
     !therapistSlug ||
+    !dateValue ||
     !selectedDate ||
     !startAt ||
     startMinutes === null
@@ -269,13 +236,65 @@ async function loadBookingSelection(
       .eq("slug", therapistSlug)
       .maybeSingle();
 
+    if (therapistError) {
+      return {
+        ...emptyResult,
+        selectedService,
+        hasError: true,
+      };
+    }
+
+    if (!selectedTherapist) {
+      return {
+        ...emptyResult,
+        selectedService,
+      };
+    }
+
+    const [workingHoursResult, bookedSlotsResult, unavailabilityResult] =
+      await Promise.all([
+        supabase
+          .from("working_hours")
+          .select("start_time, end_time")
+          .eq("therapist_id", selectedTherapist.id)
+          .eq("day_of_week", selectedDate.dayOfWeek),
+        supabase.rpc("get_booked_slots", {
+          p_therapist_id: selectedTherapist.id,
+          p_date: dateValue,
+        }),
+        supabase.rpc("get_therapist_unavailability", {
+          p_therapist_id: selectedTherapist.id,
+          p_date: dateValue,
+        }),
+      ]);
+    const schedule: TherapistSchedule = {
+      therapistId: selectedTherapist.id,
+      workingHours: workingHoursResult.data ?? [],
+      bookedSlots: (bookedSlotsResult.data ?? []) as BookedSlot[],
+      unavailabilityBlocks: (unavailabilityResult.data ??
+        []) as UnavailabilityBlock[],
+    };
+    const hasAvailabilityError = Boolean(
+      workingHoursResult.error ||
+        bookedSlotsResult.error ||
+        unavailabilityResult.error,
+    );
+    const isAvailable =
+      !hasAvailabilityError &&
+      isTimeAvailableForSchedule(
+        schedule,
+        selectedService.duration_minutes,
+        dateValue,
+        startMinutes,
+      );
+
     return {
       selectedService,
       selectedTherapist,
-      therapistCandidates: selectedTherapist ? [selectedTherapist] : [],
+      therapistCandidates: isAvailable ? [selectedTherapist] : [],
       formattedDate: selectedDate.formatted,
       startAt,
-      hasError: Boolean(therapistError),
+      hasError: hasAvailabilityError,
     };
   }
 
@@ -309,13 +328,37 @@ async function loadBookingSelection(
     };
   }
 
-  const { data: workingHours, error: workingHoursError } = await supabase
-    .from("working_hours")
-    .select("therapist_id, start_time, end_time")
-    .in("therapist_id", therapistIds)
-    .eq("day_of_week", selectedDate.dayOfWeek);
+  const [workingHoursResult, bookedSlotsResults, unavailabilityResults] =
+    await Promise.all([
+      supabase
+        .from("working_hours")
+        .select("therapist_id, start_time, end_time")
+        .in("therapist_id", therapistIds)
+        .eq("day_of_week", selectedDate.dayOfWeek),
+      Promise.all(
+        therapistIds.map((therapistId) =>
+          supabase.rpc("get_booked_slots", {
+            p_therapist_id: therapistId,
+            p_date: dateValue,
+          }),
+        ),
+      ),
+      Promise.all(
+        therapistIds.map((therapistId) =>
+          supabase.rpc("get_therapist_unavailability", {
+            p_therapist_id: therapistId,
+            p_date: dateValue,
+          }),
+        ),
+      ),
+    ]);
+  const hasAvailabilityError = Boolean(
+    workingHoursResult.error ||
+      bookedSlotsResults.some((result) => result.error) ||
+      unavailabilityResults.some((result) => result.error),
+  );
 
-  if (workingHoursError) {
+  if (hasAvailabilityError) {
     return {
       ...emptyResult,
       selectedService,
@@ -324,17 +367,27 @@ async function loadBookingSelection(
     };
   }
 
-  const eligibleTherapistIds = therapistIds.filter((therapistId) =>
-    (workingHours ?? []).some(
-      (workingHour) =>
-        workingHour.therapist_id === therapistId &&
-        worksAtSelectedTime(
-          workingHour,
-          startMinutes,
-          selectedService.duration_minutes,
-        ),
+  const workingHours =
+    (workingHoursResult.data as TherapistWorkingHour[] | null) ?? [];
+  const therapistSchedules = therapistIds.map((therapistId, index) => ({
+    therapistId,
+    workingHours: workingHours.filter(
+      (workingHour) => workingHour.therapist_id === therapistId,
     ),
-  );
+    bookedSlots: (bookedSlotsResults[index].data ?? []) as BookedSlot[],
+    unavailabilityBlocks: (unavailabilityResults[index].data ??
+      []) as UnavailabilityBlock[],
+  }));
+  const eligibleTherapistIds = therapistSchedules
+    .filter((schedule) =>
+      isTimeAvailableForSchedule(
+        schedule,
+        selectedService.duration_minutes,
+        dateValue,
+        startMinutes,
+      ),
+    )
+    .map((schedule) => schedule.therapistId);
 
   if (eligibleTherapistIds.length === 0) {
     return {
@@ -517,6 +570,8 @@ export default async function DetailsPage({ searchParams }: DetailsPageProps) {
                   serviceId: selectedService?.id ?? 0,
                   serviceName: selectedService?.name ?? "",
                   serviceSlug: selectedService?.slug ?? "",
+                  serviceDurationMinutes:
+                    selectedService?.duration_minutes ?? 0,
                   therapistCandidates,
                   date: dateValue ?? "",
                   formattedDate: formattedDate ?? "",

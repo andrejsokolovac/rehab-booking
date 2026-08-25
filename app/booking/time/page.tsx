@@ -1,9 +1,15 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
+import {
+  generateTimeSlots,
+  type BookedSlot,
+  type TherapistSchedule,
+  type UnavailabilityBlock,
+  type WorkingHour,
+} from "@/lib/booking-availability";
 
 const BELGRADE_TIME_ZONE = "Europe/Belgrade";
-const APPOINTMENT_BUFFER_MINUTES = 15;
 
 type Service = {
   id: number;
@@ -18,25 +24,8 @@ type TherapistChoice = {
   slug: string;
 };
 
-type WorkingHour = {
-  start_time: string;
-  end_time: string;
-};
-
 type TherapistWorkingHour = WorkingHour & {
   therapist_id: number;
-};
-
-type BookedSlot = {
-  start_at: string;
-  end_at: string;
-  blocked_until: string;
-};
-
-type TherapistSchedule = {
-  therapistId: number;
-  workingHours: WorkingHour[];
-  bookedSlots: BookedSlot[];
 };
 
 type TimeAvailabilityData = {
@@ -69,17 +58,6 @@ const dateFormatter = new Intl.DateTimeFormat("sr-Latn-RS", {
 
 const weekdayKeyFormatter = new Intl.DateTimeFormat("en-US", {
   weekday: "short",
-  timeZone: BELGRADE_TIME_ZONE,
-});
-
-const bookedDateTimeFormatter = new Intl.DateTimeFormat("en-CA", {
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hourCycle: "h23",
   timeZone: BELGRADE_TIME_ZONE,
 });
 
@@ -129,173 +107,6 @@ function getSelectedDate(value?: string): SelectedDate | null {
       formatted.charAt(0).toLocaleUpperCase("sr-Latn-RS") + formatted.slice(1),
     dayOfWeek: databaseDayByWeekday[weekdayKeyFormatter.format(date)],
   };
-}
-
-function parseTime(value: string) {
-  const match = value.match(/^(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/);
-
-  if (!match) {
-    return null;
-  }
-
-  const hours = Number(match[1]);
-  const minutes = Number(match[2]);
-  const seconds = Number(match[3] ?? 0);
-
-  if (hours > 23 || minutes > 59 || seconds !== 0) {
-    return null;
-  }
-
-  return hours * 60 + minutes;
-}
-
-function formatTime(totalMinutes: number) {
-  const hours = Math.floor(totalMinutes / 60)
-    .toString()
-    .padStart(2, "0");
-  const minutes = (totalMinutes % 60).toString().padStart(2, "0");
-
-  return `${hours}:${minutes}`;
-}
-
-function getLocalCalendarTimestamp(dateValue: string, totalMinutes: number) {
-  const match = dateValue.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-
-  if (!match) {
-    return null;
-  }
-
-  const [, year, month, day] = match;
-
-  return (
-    Date.UTC(Number(year), Number(month) - 1, Number(day)) +
-    totalMinutes * 60_000
-  );
-}
-
-function getBookedCalendarTimestamp(value: string) {
-  const localTimestampMatch = value.match(
-    /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/,
-  );
-
-  if (localTimestampMatch) {
-    const [, year, month, day, hour, minute, second = "0"] =
-      localTimestampMatch;
-
-    return Date.UTC(
-      Number(year),
-      Number(month) - 1,
-      Number(day),
-      Number(hour),
-      Number(minute),
-      Number(second),
-    );
-  }
-
-  const instant = new Date(value);
-
-  if (Number.isNaN(instant.getTime())) {
-    return null;
-  }
-
-  const parts = bookedDateTimeFormatter.formatToParts(instant);
-  const values = Object.fromEntries(
-    parts.map((part) => [part.type, part.value]),
-  );
-
-  return Date.UTC(
-    Number(values.year),
-    Number(values.month) - 1,
-    Number(values.day),
-    Number(values.hour),
-    Number(values.minute),
-    Number(values.second),
-  );
-}
-
-function conflictsWithBookedSlot(
-  start: number,
-  dateValue: string,
-  durationMinutes: number,
-  bookedSlots: BookedSlot[],
-) {
-  const candidateStart = getLocalCalendarTimestamp(dateValue, start);
-
-  if (candidateStart === null) {
-    return true;
-  }
-
-  const candidateBlockedUntil =
-    candidateStart +
-    (durationMinutes + APPOINTMENT_BUFFER_MINUTES) * 60_000;
-
-  return bookedSlots.some((bookedSlot) => {
-    const bookedStart = getBookedCalendarTimestamp(bookedSlot.start_at);
-    const bookedBlockedUntil = getBookedCalendarTimestamp(
-      bookedSlot.blocked_until,
-    );
-
-    if (bookedStart === null || bookedBlockedUntil === null) {
-      return true;
-    }
-
-    return (
-      candidateStart < bookedBlockedUntil &&
-      candidateBlockedUntil > bookedStart
-    );
-  });
-}
-
-function generateTimeSlots(
-  therapistSchedules: TherapistSchedule[],
-  durationMinutes: number,
-  dateValue?: string,
-) {
-  if (
-    !dateValue ||
-    !Number.isInteger(durationMinutes) ||
-    durationMinutes <= 0
-  ) {
-    return [];
-  }
-
-  const starts = new Set<number>();
-  const startIntervalMinutes =
-    durationMinutes + APPOINTMENT_BUFFER_MINUTES;
-
-  therapistSchedules.forEach((schedule) => {
-    schedule.workingHours.forEach((workingHour) => {
-      const intervalStart = parseTime(workingHour.start_time);
-      const intervalEnd = parseTime(workingHour.end_time);
-
-      if (
-        intervalStart === null ||
-        intervalEnd === null ||
-        intervalEnd <= intervalStart
-      ) {
-        return;
-      }
-
-      for (
-        let start = intervalStart;
-        start + durationMinutes <= intervalEnd;
-        start += startIntervalMinutes
-      ) {
-        if (
-          !conflictsWithBookedSlot(
-            start,
-            dateValue,
-            durationMinutes,
-            schedule.bookedSlots,
-          )
-        ) {
-          starts.add(start);
-        }
-      }
-    });
-  });
-
-  return [...starts].sort((first, second) => first - second).map(formatTime);
 }
 
 async function loadTimeAvailability(
@@ -375,15 +186,31 @@ async function loadTimeAvailability(
         }),
       ),
     );
+    const unavailabilityRequest = Promise.all(
+      therapistIds.map((therapistId) =>
+        supabase.rpc("get_therapist_unavailability", {
+          p_therapist_id: therapistId,
+          p_date: selectedDate.value,
+        }),
+      ),
+    );
 
-    const [workingHoursResult, bookedSlotsResults] = await Promise.all([
+    const [
+      workingHoursResult,
+      bookedSlotsResults,
+      unavailabilityResults,
+    ] = await Promise.all([
       workingHoursRequest,
       bookedSlotsRequest,
+      unavailabilityRequest,
     ]);
 
     const workingHours =
       (workingHoursResult.data as TherapistWorkingHour[] | null) ?? [];
     const hasBookedSlotsError = bookedSlotsResults.some(
+      (result) => result.error,
+    );
+    const hasUnavailabilityError = unavailabilityResults.some(
       (result) => result.error,
     );
     const therapistSchedules = therapistIds.map((therapistId, index) => ({
@@ -392,13 +219,19 @@ async function loadTimeAvailability(
         (workingHour) => workingHour.therapist_id === therapistId,
       ),
       bookedSlots: (bookedSlotsResults[index].data ?? []) as BookedSlot[],
+      unavailabilityBlocks: (unavailabilityResults[index].data ??
+        []) as UnavailabilityBlock[],
     }));
 
     return {
       selectedService,
       selectedTherapist,
       therapistSchedules,
-      hasError: Boolean(workingHoursResult.error || hasBookedSlotsError),
+      hasError: Boolean(
+        workingHoursResult.error ||
+          hasBookedSlotsError ||
+          hasUnavailabilityError,
+      ),
     };
   }
 
@@ -426,18 +259,23 @@ async function loadTimeAvailability(
     };
   }
 
-  const [workingHoursResult, bookedSlotsResult] = await Promise.all([
-    supabase
-      .from("working_hours")
-      .select("start_time, end_time")
-      .eq("therapist_id", selectedTherapist.id)
-      .eq("day_of_week", selectedDate.dayOfWeek)
-      .order("start_time", { ascending: true }),
-    supabase.rpc("get_booked_slots", {
-      p_therapist_id: selectedTherapist.id,
-      p_date: selectedDate.value,
-    }),
-  ]);
+  const [workingHoursResult, bookedSlotsResult, unavailabilityResult] =
+    await Promise.all([
+      supabase
+        .from("working_hours")
+        .select("start_time, end_time")
+        .eq("therapist_id", selectedTherapist.id)
+        .eq("day_of_week", selectedDate.dayOfWeek)
+        .order("start_time", { ascending: true }),
+      supabase.rpc("get_booked_slots", {
+        p_therapist_id: selectedTherapist.id,
+        p_date: selectedDate.value,
+      }),
+      supabase.rpc("get_therapist_unavailability", {
+        p_therapist_id: selectedTherapist.id,
+        p_date: selectedDate.value,
+      }),
+    ]);
 
   return {
     selectedService,
@@ -447,9 +285,15 @@ async function loadTimeAvailability(
         therapistId: selectedTherapist.id,
         workingHours: workingHoursResult.data ?? [],
         bookedSlots: (bookedSlotsResult.data ?? []) as BookedSlot[],
+        unavailabilityBlocks: (unavailabilityResult.data ??
+          []) as UnavailabilityBlock[],
       },
     ],
-    hasError: Boolean(workingHoursResult.error || bookedSlotsResult.error),
+    hasError: Boolean(
+      workingHoursResult.error ||
+        bookedSlotsResult.error ||
+        unavailabilityResult.error,
+    ),
   };
 }
 

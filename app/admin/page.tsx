@@ -11,6 +11,7 @@ import {
 } from "react";
 
 import { supabase } from "@/lib/supabase";
+import TherapistUnavailabilityModal from "./therapist-unavailability-modal";
 
 const BELGRADE_TIME_ZONE = "Europe/Belgrade";
 const APPOINTMENT_BUFFER_MINUTES = 15;
@@ -2010,6 +2011,7 @@ export default function AdminPage() {
   const [isDetailsLoading, setIsDetailsLoading] = useState(false);
   const [detailsError, setDetailsError] = useState<string>();
   const [isNewAppointmentOpen, setIsNewAppointmentOpen] = useState(false);
+  const [isUnavailabilityOpen, setIsUnavailabilityOpen] = useState(false);
   const [isCancellationConfirmationOpen, setIsCancellationConfirmationOpen] =
     useState(false);
   const [isCancellingAppointment, setIsCancellingAppointment] = useState(false);
@@ -2325,6 +2327,15 @@ export default function AdminPage() {
     showDay(selectedDate);
   }
 
+  function handleUnavailabilityCreated() {
+    setIsUnavailabilityOpen(false);
+    setBookingSuccess({
+      message: "Nedostupnost terapeuta je uspešno sačuvana.",
+      hasEmailWarning: false,
+    });
+    showDay(selectedDate);
+  }
+
   function showDay(nextDate: string) {
     setScheduleError(undefined);
     setIsScheduleLoading(true);
@@ -2434,17 +2445,30 @@ export default function AdminPage() {
                   <h1 className="mt-3 text-4xl leading-tight font-semibold tracking-[-0.035em] text-[#243c38] sm:text-5xl">
                     Raspored centra
                   </h1>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setBookingSuccess(undefined);
-                      setIsNewAppointmentOpen(true);
-                    }}
-                    className="mt-5 inline-flex min-h-11 items-center justify-center gap-2 rounded-full bg-[#397267] px-5 py-2.5 text-sm font-semibold text-white shadow-[0_10px_26px_rgba(57,114,103,0.2)] transition hover:bg-[#2f6158] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267]"
-                  >
-                    <span aria-hidden="true">+</span>
-                    Novi termin
-                  </button>
+                  <div className="mt-5 flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBookingSuccess(undefined);
+                        setIsNewAppointmentOpen(true);
+                      }}
+                      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-full bg-[#397267] px-5 py-2.5 text-sm font-semibold text-white shadow-[0_10px_26px_rgba(57,114,103,0.2)] transition hover:bg-[#2f6158] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267]"
+                    >
+                      <span aria-hidden="true">+</span>
+                      Novi termin
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBookingSuccess(undefined);
+                        setIsUnavailabilityOpen(true);
+                      }}
+                      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[#397267]/25 bg-white/80 px-5 py-2.5 text-sm font-semibold text-[#397267] transition hover:border-[#397267]/40 hover:bg-white focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267]"
+                    >
+                      <span aria-hidden="true">−</span>
+                      Blokiraj vreme
+                    </button>
+                  </div>
                 </div>
 
                 <div className="flex flex-col gap-3 lg:items-end">
@@ -2569,6 +2593,14 @@ export default function AdminPage() {
           therapists={therapists ?? []}
           onClose={() => setIsNewAppointmentOpen(false)}
           onCreated={handleManualAppointmentCreated}
+        />
+      )}
+
+      {isUnavailabilityOpen && (
+        <TherapistUnavailabilityModal
+          therapists={therapists ?? []}
+          onClose={() => setIsUnavailabilityOpen(false)}
+          onCreated={handleUnavailabilityCreated}
         />
       )}
 

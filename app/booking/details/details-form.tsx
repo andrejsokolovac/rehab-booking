@@ -2,6 +2,11 @@
 
 import { useRouter } from "next/navigation";
 import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import {
+  conflictsWithUnavailability,
+  parseTime,
+  type UnavailabilityBlock,
+} from "@/lib/booking-availability";
 import { supabase } from "@/lib/supabase";
 
 type TherapistCandidate = {
@@ -14,6 +19,7 @@ type BookingParameters = {
   serviceId: number;
   serviceName: string;
   serviceSlug: string;
+  serviceDurationMinutes: number;
   therapistCandidates: TherapistCandidate[];
   date: string;
   formattedDate: string;
@@ -195,6 +201,38 @@ async function sendTherapistBookingNotification({
   }
 }
 
+async function therapistIsAvailable(
+  therapistId: number,
+  date: string,
+  time: string,
+  durationMinutes: number,
+) {
+  const startMinutes = parseTime(time);
+
+  if (startMinutes === null) {
+    return null;
+  }
+
+  const { data, error } = await supabase.rpc(
+    "get_therapist_unavailability",
+    {
+      p_therapist_id: therapistId,
+      p_date: date,
+    },
+  );
+
+  if (error) {
+    return null;
+  }
+
+  return !conflictsWithUnavailability(
+    date,
+    startMinutes,
+    durationMinutes,
+    (data ?? []) as UnavailabilityBlock[],
+  );
+}
+
 export default function DetailsForm({ booking }: DetailsFormProps) {
   const router = useRouter();
   const submissionInProgress = useRef(false);
@@ -270,8 +308,29 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
 
     try {
       let bookingConflictOccurred = false;
+      let unavailabilityConflictOccurred = false;
 
       for (const therapist of booking.therapistCandidates) {
+        const isTherapistAvailable = await therapistIsAvailable(
+          therapist.id,
+          booking.date,
+          booking.time,
+          booking.serviceDurationMinutes,
+        );
+
+        if (isTherapistAvailable === null) {
+          setSubmitError(
+            "Dostupnost terapeuta trenutno nije moguće proveriti. Pokušajte ponovo.",
+          );
+          finishSubmitting();
+          return;
+        }
+
+        if (!isTherapistAvailable) {
+          unavailabilityConflictOccurred = true;
+          continue;
+        }
+
         const { data, error } = await supabase
           .rpc("create_appointment", {
             p_therapist_id: therapist.id,
@@ -325,6 +384,18 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
           continue;
         }
 
+        const normalizedError = error.message.toLocaleLowerCase(
+          "sr-Latn-RS",
+        );
+
+        if (
+          normalizedError.includes("nedostup") ||
+          normalizedError.includes("unavailable")
+        ) {
+          unavailabilityConflictOccurred = true;
+          continue;
+        }
+
         setSubmitError(
           "Termin trenutno nije moguće zakazati. Pokušajte ponovo kasnije.",
         );
@@ -335,7 +406,9 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
       setSubmitError(
         bookingConflictOccurred
           ? BOOKING_CONFLICT_MESSAGE
-          : "Za izabrani termin nema slobodnog terapeuta. Izaberite drugi termin.",
+          : unavailabilityConflictOccurred
+            ? "Izabrani termin više nije dostupan. Izaberite drugi termin."
+            : "Za izabrani termin nema slobodnog terapeuta. Izaberite drugi termin.",
       );
     } catch {
       setSubmitError(
