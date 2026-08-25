@@ -39,6 +39,14 @@ type CalendarAppointment = {
   formattedStartTime: string;
 };
 
+type CalendarUnavailability = {
+  id: DatabaseId;
+  calendarDate: string;
+  startMinutes: number;
+  durationMinutes: number;
+  reason: string | null;
+};
+
 type CalendarDateParts = {
   year: number;
   month: number;
@@ -394,6 +402,98 @@ function getConfirmedAppointments(data: unknown): CalendarAppointment[] | null {
   return appointments;
 }
 
+function getMyUnavailability(
+  data: unknown,
+  weekStart: string,
+): CalendarUnavailability[] | null {
+  if (!Array.isArray(data)) {
+    return null;
+  }
+
+  const intervals: CalendarUnavailability[] = [];
+
+  for (const value of data) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+
+    const row = value as Record<string, unknown>;
+    const id = getDatabaseId(row.unavailability_id);
+
+    if (
+      id === null ||
+      typeof row.start_at !== "string" ||
+      typeof row.end_at !== "string"
+    ) {
+      return null;
+    }
+
+    const intervalStart = new Date(row.start_at);
+    const intervalEnd = new Date(row.end_at);
+
+    if (
+      Number.isNaN(intervalStart.getTime()) ||
+      Number.isNaN(intervalEnd.getTime()) ||
+      intervalEnd <= intervalStart
+    ) {
+      return null;
+    }
+
+    for (let dayIndex = 0; dayIndex < WEEKDAY_NAMES.length; dayIndex += 1) {
+      const calendarDate = addCalendarDays(weekStart, dayIndex);
+      const dayStartValue = toBelgradeInstant(calendarDate, 0);
+      const dayEndValue = toBelgradeInstant(
+        addCalendarDays(calendarDate, 1),
+        0,
+      );
+
+      if (!dayStartValue || !dayEndValue) {
+        return null;
+      }
+
+      const dayStart = new Date(dayStartValue);
+      const dayEnd = new Date(dayEndValue);
+      const clippedStart = new Date(
+        Math.max(intervalStart.getTime(), dayStart.getTime()),
+      );
+      const clippedEnd = new Date(
+        Math.min(intervalEnd.getTime(), dayEnd.getTime()),
+      );
+
+      if (clippedEnd <= clippedStart) {
+        continue;
+      }
+
+      const startParts = getZonedDateTimeParts(clippedStart);
+      const endParts = getZonedDateTimeParts(clippedEnd);
+      const startMinutes =
+        clippedStart.getTime() === dayStart.getTime()
+          ? 0
+          : startParts.hour * 60 +
+            startParts.minute +
+            startParts.second / 60;
+      const endMinutes =
+        clippedEnd.getTime() === dayEnd.getTime()
+          ? 24 * 60
+          : endParts.hour * 60 + endParts.minute + endParts.second / 60;
+
+      if (endMinutes <= startMinutes) {
+        return null;
+      }
+
+      intervals.push({
+        id,
+        calendarDate,
+        startMinutes,
+        durationMinutes: endMinutes - startMinutes,
+        reason: getNonEmptyString(row.reason),
+      });
+    }
+  }
+
+  return intervals;
+}
+
 function getVisibleTimeRange(workingHours: WorkingHour[]) {
   const weekdayHours = workingHours.filter(
     (workingHour) => workingHour.dayOfWeek <= 5,
@@ -453,10 +553,12 @@ function WeeklyCalendar({
   weekStart,
   workingHours,
   appointments,
+  unavailability,
 }: {
   weekStart: string;
   workingHours: WorkingHour[];
   appointments: CalendarAppointment[];
+  unavailability: CalendarUnavailability[];
 }) {
   const weekDays = WEEKDAY_NAMES.map((name, index) => ({
     name,
@@ -525,6 +627,9 @@ function WeeklyCalendar({
             const dayAppointments = appointments.filter(
               (appointment) => appointment.calendarDate === day.date,
             );
+            const dayUnavailability = unavailability.filter(
+              (interval) => interval.calendarDate === day.date,
+            );
 
             return (
               <div
@@ -580,6 +685,49 @@ function WeeklyCalendar({
                     Neradni dan
                   </div>
                 )}
+
+                {dayUnavailability.map((interval) => {
+                  const intervalStart = Math.max(
+                    interval.startMinutes,
+                    visibleRange.startMinutes,
+                  );
+                  const intervalEnd = Math.min(
+                    interval.startMinutes + interval.durationMinutes,
+                    visibleRange.endMinutes,
+                  );
+
+                  if (intervalEnd <= intervalStart) {
+                    return null;
+                  }
+
+                  return (
+                    <div
+                      key={`${String(interval.id)}-${interval.calendarDate}`}
+                      className="absolute inset-x-1.5 z-20 overflow-hidden rounded-xl border border-[#71807c]/30 bg-[#e2e6e3] px-2 py-1 text-[11px] leading-3 text-[#40534f] shadow-[0_4px_12px_rgba(64,83,79,0.08)]"
+                      style={{
+                        top:
+                          (intervalStart - visibleRange.startMinutes) *
+                          PIXELS_PER_MINUTE,
+                        height:
+                          (intervalEnd - intervalStart) * PIXELS_PER_MINUTE,
+                        backgroundImage:
+                          "repeating-linear-gradient(135deg, rgba(64, 83, 79, 0.06) 0, rgba(64, 83, 79, 0.06) 6px, transparent 6px, transparent 12px)",
+                      }}
+                      title={
+                        interval.reason
+                          ? `Nedostupan · ${interval.reason}`
+                          : "Nedostupan"
+                      }
+                    >
+                      <p className="font-bold">Nedostupan</p>
+                      {interval.reason && (
+                        <p className="mt-0.5 truncate text-[#5f706c]">
+                          {interval.reason}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
 
                 {dayAppointments.map((appointment) => {
                   const appointmentStart = Math.max(
@@ -642,10 +790,14 @@ export default function TherapistPage() {
   const [weekStart, setWeekStart] = useState(getCurrentWeekStart);
   const [therapist, setTherapist] = useState<TherapistContext>();
   const [appointments, setAppointments] = useState<CalendarAppointment[]>([]);
+  const [unavailability, setUnavailability] = useState<
+    CalendarUnavailability[]
+  >([]);
   const [isAuthorized, setIsAuthorized] = useState(false);
   const [isScheduleLoading, setIsScheduleLoading] = useState(true);
   const [pageError, setPageError] = useState<string>();
   const [scheduleError, setScheduleError] = useState<string>();
+  const [unavailabilityWarning, setUnavailabilityWarning] = useState<string>();
   const [reloadKey, setReloadKey] = useState(0);
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string>();
@@ -758,15 +910,32 @@ export default function TherapistPage() {
       }
 
       try {
-        const { data, error } = await supabase.rpc("get_my_appointments", {
-          p_from: from,
-          p_to: to,
-        });
-        const confirmedAppointments = getConfirmedAppointments(data);
+        const unavailabilityRequest = (async () => {
+          try {
+            return await supabase.rpc("get_my_unavailability", {
+              p_from: from,
+              p_to: to,
+            });
+          } catch {
+            return null;
+          }
+        })();
+        const [appointmentsResult, unavailabilityResult] = await Promise.all([
+          supabase.rpc("get_my_appointments", {
+            p_from: from,
+            p_to: to,
+          }),
+          unavailabilityRequest,
+        ]);
+        const confirmedAppointments = getConfirmedAppointments(
+          appointmentsResult.data,
+        );
 
-        if (error || !confirmedAppointments) {
+        if (appointmentsResult.error || !confirmedAppointments) {
           if (isActive) {
             setAppointments([]);
+            setUnavailability([]);
+            setUnavailabilityWarning(undefined);
             setScheduleError(
               "Termine trenutno nije moguće učitati. Pokušajte ponovo.",
             );
@@ -776,11 +945,27 @@ export default function TherapistPage() {
 
         if (isActive) {
           setAppointments(confirmedAppointments);
+          const loadedUnavailability = unavailabilityResult
+            ? getMyUnavailability(unavailabilityResult.data, weekStart)
+            : null;
+
+          if (unavailabilityResult?.error || !loadedUnavailability) {
+            setUnavailability([]);
+            setUnavailabilityWarning(
+              "Nedostupnost trenutno nije moguće učitati.",
+            );
+          } else {
+            setUnavailability(loadedUnavailability);
+            setUnavailabilityWarning(undefined);
+          }
+
           setScheduleError(undefined);
         }
       } catch {
         if (isActive) {
           setAppointments([]);
+          setUnavailability([]);
+          setUnavailabilityWarning(undefined);
           setScheduleError(
             "Došlo je do neočekivane greške pri učitavanju termina.",
           );
@@ -801,6 +986,7 @@ export default function TherapistPage() {
 
   function showWeek(nextWeekStart: string) {
     setScheduleError(undefined);
+    setUnavailabilityWarning(undefined);
     setIsScheduleLoading(true);
 
     if (nextWeekStart === weekStart) {
@@ -970,7 +1156,26 @@ export default function TherapistPage() {
                   <span className="h-3 w-3 rounded-sm border border-[#397267]/25 bg-[#dceee5]" />
                   Zakazan termin
                 </span>
+                <span className="inline-flex items-center gap-2">
+                  <span
+                    className="h-3 w-3 rounded-sm border border-[#71807c]/30 bg-[#e2e6e3]"
+                    style={{
+                      backgroundImage:
+                        "repeating-linear-gradient(135deg, rgba(64, 83, 79, 0.08) 0, rgba(64, 83, 79, 0.08) 2px, transparent 2px, transparent 4px)",
+                    }}
+                  />
+                  Nedostupnost
+                </span>
               </div>
+
+              {unavailabilityWarning && (
+                <div
+                  role="status"
+                  className="mt-5 rounded-2xl border border-[#d89a58]/20 bg-[#fff8ec] px-5 py-3 text-sm font-medium text-[#815a2d]"
+                >
+                  {unavailabilityWarning}
+                </div>
+              )}
 
               {isScheduleLoading ? (
                 <div
@@ -1005,6 +1210,7 @@ export default function TherapistPage() {
                       weekStart={weekStart}
                       workingHours={therapist.workingHours}
                       appointments={appointments}
+                      unavailability={unavailability}
                     />
                   </div>
                 </>

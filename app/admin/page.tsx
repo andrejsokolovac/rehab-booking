@@ -45,6 +45,18 @@ type CalendarAppointment = {
   formattedStartTime: string;
 };
 
+type CalendarUnavailability = {
+  id: DatabaseId;
+  therapistId: DatabaseId;
+  therapistName: string;
+  calendarDate: string;
+  startAt: string;
+  endAt: string;
+  startMinutes: number;
+  durationMinutes: number;
+  reason: string | null;
+};
+
 type AppointmentDetails = {
   childName: string;
   parentName: string;
@@ -491,6 +503,96 @@ function getConfirmedAppointments(data: unknown): CalendarAppointment[] | null {
   return appointments;
 }
 
+function getAdminUnavailability(
+  data: unknown,
+  selectedDate: string,
+): CalendarUnavailability[] | null {
+  if (!Array.isArray(data)) {
+    return null;
+  }
+
+  const dayStartValue = toBelgradeInstant(selectedDate, 0);
+  const dayEndValue = toBelgradeInstant(addCalendarDays(selectedDate, 1), 0);
+
+  if (!dayStartValue || !dayEndValue) {
+    return null;
+  }
+
+  const dayStart = new Date(dayStartValue);
+  const dayEnd = new Date(dayEndValue);
+  const intervals: CalendarUnavailability[] = [];
+
+  for (const value of data) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+
+    const row = value as Record<string, unknown>;
+    const id = getDatabaseId(row.unavailability_id);
+    const therapistId = getDatabaseId(row.therapist_id);
+    const therapistName = getNonEmptyString(row.therapist_name);
+
+    if (
+      id === null ||
+      therapistId === null ||
+      !therapistName ||
+      typeof row.start_at !== "string" ||
+      typeof row.end_at !== "string"
+    ) {
+      return null;
+    }
+
+    const intervalStart = new Date(row.start_at);
+    const intervalEnd = new Date(row.end_at);
+
+    if (
+      Number.isNaN(intervalStart.getTime()) ||
+      Number.isNaN(intervalEnd.getTime()) ||
+      intervalEnd <= intervalStart
+    ) {
+      return null;
+    }
+
+    const clippedStart = new Date(
+      Math.max(intervalStart.getTime(), dayStart.getTime()),
+    );
+    const clippedEnd = new Date(
+      Math.min(intervalEnd.getTime(), dayEnd.getTime()),
+    );
+
+    if (clippedEnd <= clippedStart) {
+      continue;
+    }
+
+    const startParts = getZonedDateTimeParts(clippedStart);
+    const endParts = getZonedDateTimeParts(clippedEnd);
+    const startMinutes =
+      startParts.hour * 60 + startParts.minute + startParts.second / 60;
+    const endMinutes =
+      clippedEnd.getTime() === dayEnd.getTime()
+        ? 24 * 60
+        : endParts.hour * 60 + endParts.minute + endParts.second / 60;
+
+    if (endMinutes <= startMinutes) {
+      return null;
+    }
+
+    intervals.push({
+      id,
+      therapistId,
+      therapistName,
+      calendarDate: selectedDate,
+      startAt: clippedStart.toISOString(),
+      endAt: clippedEnd.toISOString(),
+      startMinutes,
+      durationMinutes: endMinutes - startMinutes,
+      reason: getNonEmptyString(row.reason),
+    });
+  }
+
+  return intervals;
+}
+
 function getAppointmentDetails(
   data: unknown,
   expectedAppointmentId: DatabaseId,
@@ -792,6 +894,50 @@ function getAppointmentRpcResult(
   };
 }
 
+function getDeletedUnavailabilityCount(data: unknown) {
+  const value = Array.isArray(data) ? data[0] : data;
+
+  function parseCount(candidate: unknown) {
+    if (
+      typeof candidate === "number" &&
+      Number.isSafeInteger(candidate) &&
+      candidate >= 0
+    ) {
+      return candidate;
+    }
+
+    if (typeof candidate === "string" && /^\d+$/.test(candidate)) {
+      const parsed = Number(candidate);
+      return Number.isSafeInteger(parsed) ? parsed : null;
+    }
+
+    return null;
+  }
+
+  const directCount = parseCount(value);
+
+  if (directCount !== null) {
+    return directCount;
+  }
+
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const row = value as Record<string, unknown>;
+  const namedCount = parseCount(
+    row.deleted_count ?? row.delete_admin_unavailability ?? row.count,
+  );
+
+  if (namedCount !== null) {
+    return namedCount;
+  }
+
+  const values = Object.values(row);
+
+  return values.length === 1 ? parseCount(values[0]) : null;
+}
+
 function getManualFieldError(
   field: ManualBookingField,
   value: string,
@@ -1018,6 +1164,10 @@ function formatDetailsTime(startAt: string, endAt: string) {
   return `${appointmentTimeFormatter.format(new Date(startAt))}–${appointmentTimeFormatter.format(new Date(endAt))}`;
 }
 
+function formatDetailsSingleTime(value: string) {
+  return appointmentTimeFormatter.format(new Date(value));
+}
+
 function formatCreatedAt(value: string) {
   return detailDateTimeFormatter.format(new Date(value));
 }
@@ -1038,12 +1188,16 @@ function DailyCalendar({
   therapists,
   workingHours,
   appointments,
+  unavailability,
   onAppointmentClick,
+  onUnavailabilityClick,
 }: {
   therapists: Therapist[];
   workingHours: WorkingHour[];
   appointments: CalendarAppointment[];
+  unavailability: CalendarUnavailability[];
   onAppointmentClick: (appointmentId: DatabaseId) => void;
+  onUnavailabilityClick: (interval: CalendarUnavailability) => void;
 }) {
   const visibleRange = getVisibleTimeRange(workingHours);
   const calendarHeight =
@@ -1110,6 +1264,9 @@ function DailyCalendar({
             const therapistAppointments = appointments.filter((appointment) =>
               idsMatch(appointment.therapistId, therapist.id),
             );
+            const therapistUnavailability = unavailability.filter((interval) =>
+              idsMatch(interval.therapistId, therapist.id),
+            );
 
             return (
               <div
@@ -1167,6 +1324,53 @@ function DailyCalendar({
                     Ne radi ovog dana
                   </div>
                 )}
+
+                {therapistUnavailability.map((interval) => {
+                  const intervalStart = Math.max(
+                    interval.startMinutes,
+                    visibleRange.startMinutes,
+                  );
+                  const intervalEnd = Math.min(
+                    interval.startMinutes + interval.durationMinutes,
+                    visibleRange.endMinutes,
+                  );
+
+                  if (intervalEnd <= intervalStart) {
+                    return null;
+                  }
+
+                  return (
+                    <button
+                      type="button"
+                      key={`${String(interval.id)}-${interval.startAt}-${interval.endAt}`}
+                      onClick={() => onUnavailabilityClick(interval)}
+                      aria-label={`Prikaži nedostupnost terapeuta ${interval.therapistName}`}
+                      className="absolute inset-x-1.5 z-20 cursor-pointer overflow-hidden rounded-xl border border-[#71807c]/30 bg-[#e2e6e3] px-2 py-1 text-left text-[11px] leading-3 text-[#40534f] shadow-[0_4px_12px_rgba(64,83,79,0.08)] transition hover:border-[#5f706c]/50 hover:bg-[#d9dfdb] focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-[#5f706c]"
+                      style={{
+                        top:
+                          CALENDAR_VERTICAL_PADDING +
+                          (intervalStart - visibleRange.startMinutes) *
+                            PIXELS_PER_MINUTE,
+                        height:
+                          (intervalEnd - intervalStart) * PIXELS_PER_MINUTE,
+                        backgroundImage:
+                          "repeating-linear-gradient(135deg, rgba(64, 83, 79, 0.06) 0, rgba(64, 83, 79, 0.06) 6px, transparent 6px, transparent 12px)",
+                      }}
+                      title={
+                        interval.reason
+                          ? `Nedostupan · ${interval.reason}`
+                          : "Nedostupan"
+                      }
+                    >
+                      <p className="font-bold">Nedostupan</p>
+                      {interval.reason && (
+                        <p className="mt-0.5 truncate text-[#5f706c]">
+                          {interval.reason}
+                        </p>
+                      )}
+                    </button>
+                  );
+                })}
 
                 {therapistAppointments.map((appointment) => {
                   const appointmentStart = Math.max(
@@ -1991,16 +2195,21 @@ export default function AdminPage() {
   const signOutInProgress = useRef(false);
   const detailsRequestId = useRef(0);
   const cancellationInProgress = useRef(false);
+  const unavailabilityRemovalInProgress = useRef(false);
   const [selectedDate, setSelectedDate] = useState(
     getCurrentBelgradeCalendarDate,
   );
   const [therapists, setTherapists] = useState<Therapist[]>();
   const [workingHours, setWorkingHours] = useState<WorkingHour[]>([]);
   const [appointments, setAppointments] = useState<CalendarAppointment[]>([]);
+  const [unavailability, setUnavailability] = useState<
+    CalendarUnavailability[]
+  >([]);
   const [isAuthorized, setIsAuthorized] = useState(false);
   const [isScheduleLoading, setIsScheduleLoading] = useState(true);
   const [pageError, setPageError] = useState<string>();
   const [scheduleError, setScheduleError] = useState<string>();
+  const [unavailabilityWarning, setUnavailabilityWarning] = useState<string>();
   const [reloadKey, setReloadKey] = useState(0);
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string>();
@@ -2012,6 +2221,14 @@ export default function AdminPage() {
   const [detailsError, setDetailsError] = useState<string>();
   const [isNewAppointmentOpen, setIsNewAppointmentOpen] = useState(false);
   const [isUnavailabilityOpen, setIsUnavailabilityOpen] = useState(false);
+  const [selectedUnavailability, setSelectedUnavailability] =
+    useState<CalendarUnavailability | null>(null);
+  const [isUnavailabilityRemovalConfirmationOpen, setIsUnavailabilityRemovalConfirmationOpen] =
+    useState(false);
+  const [isRemovingUnavailability, setIsRemovingUnavailability] =
+    useState(false);
+  const [unavailabilityRemovalError, setUnavailabilityRemovalError] =
+    useState<string>();
   const [isCancellationConfirmationOpen, setIsCancellationConfirmationOpen] =
     useState(false);
   const [isCancellingAppointment, setIsCancellingAppointment] = useState(false);
@@ -2112,17 +2329,29 @@ export default function AdminPage() {
       }
 
       try {
-        const [workingHoursResult, appointmentsResult] = await Promise.all([
-          supabase
-            .from("working_hours")
-            .select("therapist_id, day_of_week, start_time, end_time")
-            .eq("day_of_week", dayOfWeek)
-            .order("start_time", { ascending: true }),
-          supabase.rpc("get_admin_appointments", {
-            p_from: from,
-            p_to: to,
-          }),
-        ]);
+        const unavailabilityRequest = (async () => {
+          try {
+            return await supabase.rpc("get_admin_unavailability", {
+              p_from: from,
+              p_to: to,
+            });
+          } catch {
+            return null;
+          }
+        })();
+        const [workingHoursResult, appointmentsResult, unavailabilityResult] =
+          await Promise.all([
+            supabase
+              .from("working_hours")
+              .select("therapist_id, day_of_week, start_time, end_time")
+              .eq("day_of_week", dayOfWeek)
+              .order("start_time", { ascending: true }),
+            supabase.rpc("get_admin_appointments", {
+              p_from: from,
+              p_to: to,
+            }),
+            unavailabilityRequest,
+          ]);
         const loadedWorkingHours = getWorkingHours(workingHoursResult.data);
         const loadedAppointments = getConfirmedAppointments(
           appointmentsResult.data,
@@ -2137,6 +2366,8 @@ export default function AdminPage() {
           if (isActive) {
             setWorkingHours([]);
             setAppointments([]);
+            setUnavailability([]);
+            setUnavailabilityWarning(undefined);
             setScheduleError(
               "Raspored za izabrani dan trenutno nije moguće učitati.",
             );
@@ -2151,12 +2382,31 @@ export default function AdminPage() {
               (appointment) => appointment.calendarDate === selectedDate,
             ),
           );
+          const loadedUnavailability = unavailabilityResult
+            ? getAdminUnavailability(
+                unavailabilityResult.data,
+                selectedDate,
+              )
+            : null;
+
+          if (unavailabilityResult?.error || !loadedUnavailability) {
+            setUnavailability([]);
+            setUnavailabilityWarning(
+              "Nedostupnost terapeuta trenutno nije moguće učitati.",
+            );
+          } else {
+            setUnavailability(loadedUnavailability);
+            setUnavailabilityWarning(undefined);
+          }
+
           setScheduleError(undefined);
         }
       } catch {
         if (isActive) {
           setWorkingHours([]);
           setAppointments([]);
+          setUnavailability([]);
+          setUnavailabilityWarning(undefined);
           setScheduleError(
             "Došlo je do neočekivane greške pri učitavanju rasporeda.",
           );
@@ -2231,6 +2481,82 @@ export default function AdminPage() {
     setIsDetailsLoading(false);
     setIsCancellationConfirmationOpen(false);
     setCancellationError(undefined);
+  }
+
+  function openUnavailabilityDetails(interval: CalendarUnavailability) {
+    setSelectedUnavailability(interval);
+    setIsUnavailabilityRemovalConfirmationOpen(false);
+    setUnavailabilityRemovalError(undefined);
+  }
+
+  function closeUnavailabilityDetails() {
+    if (unavailabilityRemovalInProgress.current) {
+      return;
+    }
+
+    setSelectedUnavailability(null);
+    setIsUnavailabilityRemovalConfirmationOpen(false);
+    setUnavailabilityRemovalError(undefined);
+    setIsRemovingUnavailability(false);
+  }
+
+  async function removeSelectedUnavailability() {
+    if (
+      unavailabilityRemovalInProgress.current ||
+      !selectedUnavailability
+    ) {
+      return;
+    }
+
+    const unavailabilityId = selectedUnavailability.id;
+    unavailabilityRemovalInProgress.current = true;
+    setIsRemovingUnavailability(true);
+    setUnavailabilityRemovalError(undefined);
+
+    let deletedCount: number | null = null;
+
+    try {
+      const { data, error } = await supabase.rpc(
+        "delete_admin_unavailability",
+        {
+          p_unavailability_id: unavailabilityId,
+        },
+      );
+
+      if (error) {
+        setUnavailabilityRemovalError(
+          "Blokadu trenutno nije moguće ukloniti. Pokušajte ponovo.",
+        );
+        return;
+      }
+
+      deletedCount = getDeletedUnavailabilityCount(data);
+
+      if (deletedCount === null || deletedCount < 1) {
+        setUnavailabilityRemovalError(
+          "Blokada nije uklonjena. Osvežite raspored i pokušajte ponovo.",
+        );
+        return;
+      }
+    } catch {
+      setUnavailabilityRemovalError(
+        "Došlo je do neočekivane greške pri uklanjanju blokade.",
+      );
+      return;
+    } finally {
+      unavailabilityRemovalInProgress.current = false;
+      setIsRemovingUnavailability(false);
+    }
+
+    closeUnavailabilityDetails();
+    setBookingSuccess({
+      message:
+        deletedCount > 1
+          ? "Ceo povezani period nedostupnosti je uspešno uklonjen."
+          : "Blokada je uspešno uklonjena.",
+      hasEmailWarning: false,
+    });
+    showDay(selectedDate);
   }
 
   async function cancelSelectedAppointment() {
@@ -2338,6 +2664,7 @@ export default function AdminPage() {
 
   function showDay(nextDate: string) {
     setScheduleError(undefined);
+    setUnavailabilityWarning(undefined);
     setIsScheduleLoading(true);
 
     if (nextDate === selectedDate) {
@@ -2539,7 +2866,26 @@ export default function AdminPage() {
                   <span className="h-3 w-3 rounded-sm border border-[#397267]/25 bg-[#dceee5]" />
                   Zakazan termin
                 </span>
+                <span className="inline-flex items-center gap-2">
+                  <span
+                    className="h-3 w-3 rounded-sm border border-[#71807c]/30 bg-[#e2e6e3]"
+                    style={{
+                      backgroundImage:
+                        "repeating-linear-gradient(135deg, rgba(64, 83, 79, 0.08) 0, rgba(64, 83, 79, 0.08) 2px, transparent 2px, transparent 4px)",
+                    }}
+                  />
+                  Nedostupnost
+                </span>
               </div>
+
+              {unavailabilityWarning && (
+                <div
+                  role="status"
+                  className="mt-5 rounded-2xl border border-[#d89a58]/20 bg-[#fff8ec] px-5 py-3 text-sm font-medium text-[#815a2d]"
+                >
+                  {unavailabilityWarning}
+                </div>
+              )}
 
               {therapists.length === 0 ? (
                 <p className="mt-6 rounded-2xl border border-[#397267]/12 bg-white/70 px-5 py-4 text-sm font-medium text-[#526b66]">
@@ -2578,7 +2924,9 @@ export default function AdminPage() {
                       therapists={therapists}
                       workingHours={workingHours}
                       appointments={appointments}
+                      unavailability={unavailability}
                       onAppointmentClick={openAppointmentDetails}
+                      onUnavailabilityClick={openUnavailabilityDetails}
                     />
                   </div>
                 </>
@@ -2602,6 +2950,187 @@ export default function AdminPage() {
           onClose={() => setIsUnavailabilityOpen(false)}
           onCreated={handleUnavailabilityCreated}
         />
+      )}
+
+      {selectedUnavailability && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[#172b27]/45 p-4 backdrop-blur-sm"
+          onMouseDown={(event) => {
+            if (
+              event.target === event.currentTarget &&
+              !unavailabilityRemovalInProgress.current
+            ) {
+              closeUnavailabilityDetails();
+            }
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="unavailability-details-title"
+            className="max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-y-auto rounded-3xl border border-white/80 bg-[#fffaf3] p-6 shadow-[0_28px_90px_rgba(23,43,39,0.28)] sm:p-8"
+          >
+            <div className="flex items-start justify-between gap-5">
+              <div>
+                <p className="text-xs font-semibold tracking-[0.12em] text-[#5f706c] uppercase">
+                  Detalji blokade
+                </p>
+                <h2
+                  id="unavailability-details-title"
+                  className="mt-2 text-2xl font-semibold tracking-[-0.025em] text-[#243c38] sm:text-3xl"
+                >
+                  Nedostupan
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={closeUnavailabilityDetails}
+                disabled={isRemovingUnavailability}
+                aria-label="Zatvori detalje blokade"
+                className="grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-full border border-[#397267]/15 bg-white text-xl leading-none text-[#397267] transition hover:border-[#397267]/30 hover:bg-[#edf5f0] focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-[#397267] disabled:cursor-wait disabled:opacity-50"
+              >
+                ×
+              </button>
+            </div>
+
+            <dl className="mt-8 grid gap-x-8 gap-y-5 sm:grid-cols-2">
+              <div className="border-b border-[#397267]/10 pb-4 sm:col-span-2">
+                <dt className="text-xs font-semibold tracking-wide text-[#6b807c] uppercase">
+                  Terapeut
+                </dt>
+                <dd className="mt-1.5 font-semibold text-[#243c38]">
+                  {selectedUnavailability.therapistName}
+                </dd>
+              </div>
+              <div className="border-b border-[#397267]/10 pb-4 sm:col-span-2">
+                <dt className="text-xs font-semibold tracking-wide text-[#6b807c] uppercase">
+                  Datum
+                </dt>
+                <dd className="mt-1.5 capitalize font-medium text-[#243c38]">
+                  {formatDetailsDate(selectedUnavailability.startAt)}
+                </dd>
+              </div>
+              <div className="border-b border-[#397267]/10 pb-4">
+                <dt className="text-xs font-semibold tracking-wide text-[#6b807c] uppercase">
+                  Od
+                </dt>
+                <dd className="mt-1.5 font-medium text-[#243c38]">
+                  {formatDetailsSingleTime(selectedUnavailability.startAt)}
+                </dd>
+              </div>
+              <div className="border-b border-[#397267]/10 pb-4">
+                <dt className="text-xs font-semibold tracking-wide text-[#6b807c] uppercase">
+                  Do
+                </dt>
+                <dd className="mt-1.5 font-medium text-[#243c38]">
+                  {formatDetailsSingleTime(selectedUnavailability.endAt)}
+                </dd>
+              </div>
+              <div className="sm:col-span-2">
+                <dt className="text-xs font-semibold tracking-wide text-[#6b807c] uppercase">
+                  Razlog
+                </dt>
+                <dd className="mt-1.5 font-medium text-[#243c38]">
+                  {selectedUnavailability.reason ?? "Nije naveden razlog."}
+                </dd>
+              </div>
+            </dl>
+
+            <div className="mt-8 flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  setUnavailabilityRemovalError(undefined);
+                  setIsUnavailabilityRemovalConfirmationOpen(true);
+                }}
+                className="min-h-11 rounded-full border border-[#b45745]/25 bg-[#fff8f5] px-6 py-2 text-sm font-semibold text-[#a34838] transition hover:border-[#b45745]/45 hover:bg-[#f9e8e2] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#b45745] sm:mr-auto"
+              >
+                Ukloni blokadu
+              </button>
+              <button
+                type="button"
+                onClick={closeUnavailabilityDetails}
+                className="min-h-11 rounded-full bg-[#397267] px-6 py-2 text-sm font-semibold text-white transition hover:bg-[#2f6158] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267]"
+              >
+                Zatvori
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isUnavailabilityRemovalConfirmationOpen && selectedUnavailability && (
+        <div
+          className="fixed inset-0 z-60 flex items-center justify-center bg-[#172b27]/55 p-4 backdrop-blur-sm"
+          onMouseDown={(event) => {
+            if (
+              event.target === event.currentTarget &&
+              !isRemovingUnavailability
+            ) {
+              setIsUnavailabilityRemovalConfirmationOpen(false);
+              setUnavailabilityRemovalError(undefined);
+            }
+          }}
+        >
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="remove-unavailability-title"
+            aria-describedby="remove-unavailability-description"
+            className="w-full max-w-lg rounded-3xl border border-white/80 bg-[#fffaf3] p-6 shadow-[0_28px_90px_rgba(23,43,39,0.32)] sm:p-8"
+          >
+            <div className="grid h-12 w-12 place-items-center rounded-2xl bg-[#f7dfd7] text-2xl text-[#a34838]">
+              <span aria-hidden="true">!</span>
+            </div>
+            <h2
+              id="remove-unavailability-title"
+              className="mt-5 text-2xl font-semibold tracking-[-0.025em] text-[#243c38]"
+            >
+              Da li ste sigurni da želite da uklonite ovu blokadu?
+            </h2>
+            <p
+              id="remove-unavailability-description"
+              className="mt-3 text-sm leading-6 text-[#6b807c]"
+            >
+              Ako blokada pripada višednevnom odsustvu, ceo povezani period može
+              biti uklonjen.
+            </p>
+
+            {unavailabilityRemovalError && (
+              <div
+                role="alert"
+                className="mt-5 rounded-2xl border border-[#b45745]/20 bg-[#fff8f5] px-4 py-3 text-sm font-medium leading-6 text-[#8f4033]"
+              >
+                {unavailabilityRemovalError}
+              </div>
+            )}
+
+            <div className="mt-7 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsUnavailabilityRemovalConfirmationOpen(false);
+                  setUnavailabilityRemovalError(undefined);
+                }}
+                disabled={isRemovingUnavailability}
+                className="min-h-11 rounded-full border border-[#397267]/20 bg-white px-6 py-2 text-sm font-semibold text-[#397267] transition hover:border-[#397267]/35 disabled:cursor-wait disabled:opacity-50"
+              >
+                Odustani
+              </button>
+              <button
+                type="button"
+                onClick={() => void removeSelectedUnavailability()}
+                disabled={isRemovingUnavailability}
+                aria-busy={isRemovingUnavailability}
+                className="min-h-11 rounded-full bg-[#b45745] px-6 py-2 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(180,87,69,0.22)] transition hover:bg-[#984737] disabled:cursor-wait disabled:opacity-60"
+              >
+                {isRemovingUnavailability
+                  ? "Uklanjanje..."
+                  : "Potvrdi uklanjanje"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {selectedAppointmentId !== null && (
