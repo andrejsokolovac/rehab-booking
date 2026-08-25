@@ -46,6 +46,7 @@ type ConfirmationPageProps = {
     therapist?: string | string[];
     date?: string | string[];
     time?: string | string[];
+    notification?: string | string[];
   }>;
 };
 
@@ -60,6 +61,9 @@ export default async function ConfirmationPage({
   const therapistSlug = getValue(params.therapist);
   const dateValue = getValue(params.date);
   const timeValue = getValue(params.time);
+  const notification = getValue(params.notification);
+  const emailWasSent = notification === "sent";
+  const emailFailed = notification === "failed";
   const formattedDate = formatSelectedDate(dateValue);
   const [serviceResult, therapistResult] =
     serviceSlug && therapistSlug
@@ -161,6 +165,22 @@ export default async function ConfirmationPage({
                   </p>
                 </div>
               </div>
+
+              {emailWasSent && (
+                <p className="mt-5 rounded-2xl border border-[#397267]/15 bg-[#edf7f1] px-5 py-4 text-sm font-medium leading-6 text-[#315f56]">
+                  Potvrda termina poslata je na vašu email adresu.
+                </p>
+              )}
+
+              {emailFailed && (
+                <p
+                  role="alert"
+                  className="mt-5 rounded-2xl border border-[#b45745]/20 bg-[#fff8f5] px-5 py-4 text-sm font-medium leading-6 text-[#8f4033]"
+                >
+                  Termin je uspešno zakazan, ali potvrdu putem emaila trenutno
+                  nije bilo moguće poslati.
+                </p>
+              )}
             </>
           ) : (
             <>

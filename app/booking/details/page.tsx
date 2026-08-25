@@ -515,9 +515,11 @@ export default async function DetailsPage({ searchParams }: DetailsPageProps) {
               <DetailsForm
                 booking={{
                   serviceId: selectedService?.id ?? 0,
+                  serviceName: selectedService?.name ?? "",
                   serviceSlug: selectedService?.slug ?? "",
                   therapistCandidates,
                   date: dateValue ?? "",
+                  formattedDate: formattedDate ?? "",
                   time: timeValue ?? "",
                   startAt: startAt ?? "",
                 }}

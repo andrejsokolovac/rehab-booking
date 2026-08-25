@@ -1,19 +1,22 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState, type ChangeEvent, type FormEvent } from "react";
+import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { supabase } from "@/lib/supabase";
 
 type TherapistCandidate = {
   id: number;
+  name: string;
   slug: string;
 };
 
 type BookingParameters = {
   serviceId: number;
+  serviceName: string;
   serviceSlug: string;
   therapistCandidates: TherapistCandidate[];
   date: string;
+  formattedDate: string;
   time: string;
   startAt: string;
 };
@@ -127,12 +130,65 @@ function getFieldError(name: FieldName, value: string) {
   return undefined;
 }
 
+async function sendBookingConfirmationEmail({
+  email,
+  serviceName,
+  therapistName,
+  date,
+  time,
+  cancelToken,
+}: {
+  email: string;
+  serviceName: string;
+  therapistName: string;
+  date: string;
+  time: string;
+  cancelToken: string;
+}) {
+  try {
+    const response = await fetch("/api/send-booking-confirmation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email,
+        serviceName,
+        therapistName,
+        date,
+        time,
+        cancelToken,
+      }),
+    });
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const result: unknown = await response.json();
+
+    return Boolean(
+      result &&
+        typeof result === "object" &&
+        (result as Record<string, unknown>).success === true,
+    );
+  } catch {
+    return false;
+  }
+}
+
 export default function DetailsForm({ booking }: DetailsFormProps) {
   const router = useRouter();
+  const submissionInProgress = useRef(false);
   const [values, setValues] = useState<FormValues>(initialValues);
   const [errors, setErrors] = useState<Partial<Record<FieldName, string>>>({});
   const [submitError, setSubmitError] = useState<string>();
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
+
+  function finishSubmitting() {
+    submissionInProgress.current = false;
+    setIsSubmitting(false);
+    setIsSendingEmail(false);
+  }
 
   function setFieldError(name: FieldName, value: string) {
     const error = getFieldError(name, value);
@@ -168,7 +224,7 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (isSubmitting) {
+    if (submissionInProgress.current) {
       return;
     }
 
@@ -189,6 +245,7 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
     }
 
     setSubmitError(undefined);
+    submissionInProgress.current = true;
     setIsSubmitting(true);
 
     try {
@@ -209,11 +266,21 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
         const createdAppointment = getCreatedAppointmentResult(data);
 
         if (!error && createdAppointment) {
+          setIsSendingEmail(true);
+          const emailWasSent = await sendBookingConfirmationEmail({
+            email: values.email.trim(),
+            serviceName: booking.serviceName,
+            therapistName: therapist.name,
+            date: booking.formattedDate,
+            time: booking.time,
+            cancelToken: createdAppointment.cancelToken,
+          });
           const confirmationParams = new URLSearchParams({
             service: booking.serviceSlug,
             therapist: therapist.slug,
             date: booking.date,
             time: booking.time,
+            notification: emailWasSent ? "sent" : "failed",
           });
 
           router.push(
@@ -226,7 +293,7 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
           setSubmitError(
             "Termin je kreiran, ali potvrdu trenutno nije moguće prikazati. Kontaktirajte centar pre ponovnog pokušaja.",
           );
-          setIsSubmitting(false);
+          finishSubmitting();
           return;
         }
 
@@ -238,7 +305,7 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
         setSubmitError(
           "Termin trenutno nije moguće zakazati. Pokušajte ponovo kasnije.",
         );
-        setIsSubmitting(false);
+        finishSubmitting();
         return;
       }
 
@@ -253,7 +320,7 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
       );
     }
 
-    setIsSubmitting(false);
+    finishSubmitting();
   }
 
   return (
@@ -329,7 +396,11 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
           aria-busy={isSubmitting}
           className="inline-flex min-h-13 w-full cursor-pointer items-center justify-center rounded-full bg-[#397267] px-8 py-3.5 text-base font-semibold text-white shadow-[0_12px_30px_rgba(57,114,103,0.22)] transition hover:bg-[#2f6158] focus-visible:outline-3 focus-visible:outline-offset-4 focus-visible:outline-[#397267] disabled:cursor-wait disabled:opacity-65 sm:w-auto"
         >
-          {isSubmitting ? "Zakazivanje..." : "Potvrdi termin"}
+          {isSendingEmail
+            ? "Slanje potvrde..."
+            : isSubmitting
+              ? "Zakazivanje..."
+              : "Potvrdi termin"}
         </button>
       </div>
     </form>
