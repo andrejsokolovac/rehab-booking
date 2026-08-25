@@ -47,6 +47,17 @@ type CalendarUnavailability = {
   reason: string | null;
 };
 
+type AppointmentDetails = {
+  childName: string;
+  parentName: string;
+  parentEmail: string;
+  parentPhone: string;
+  serviceName: string;
+  startAt: string;
+  endAt: string;
+  status: string;
+};
+
 type CalendarDateParts = {
   year: number;
   month: number;
@@ -79,6 +90,14 @@ const appointmentTimeFormatter = new Intl.DateTimeFormat("sr-Latn-RS", {
 });
 
 const weekRangeDateFormatter = new Intl.DateTimeFormat("sr-Latn-RS", {
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+  timeZone: BELGRADE_TIME_ZONE,
+});
+
+const detailDateFormatter = new Intl.DateTimeFormat("sr-Latn-RS", {
+  weekday: "long",
   day: "numeric",
   month: "long",
   year: "numeric",
@@ -402,6 +421,63 @@ function getConfirmedAppointments(data: unknown): CalendarAppointment[] | null {
   return appointments;
 }
 
+function getAppointmentDetails(
+  data: unknown,
+  expectedAppointmentId: DatabaseId,
+): AppointmentDetails | null {
+  const value = Array.isArray(data) ? data[0] : data;
+
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const row = value as Record<string, unknown>;
+  const appointmentId = getDatabaseId(row.appointment_id);
+  const childName = getNonEmptyString(row.child_name);
+  const parentName = getNonEmptyString(row.parent_name);
+  const parentEmail = getNonEmptyString(row.parent_email);
+  const parentPhone = getNonEmptyString(row.parent_phone);
+  const serviceName = getNonEmptyString(row.service_name);
+  const status = getNonEmptyString(row.status);
+
+  if (
+    appointmentId === null ||
+    String(appointmentId) !== String(expectedAppointmentId) ||
+    !childName ||
+    !parentName ||
+    !parentEmail ||
+    !parentPhone ||
+    !serviceName ||
+    !status ||
+    typeof row.start_at !== "string" ||
+    typeof row.end_at !== "string"
+  ) {
+    return null;
+  }
+
+  const start = new Date(row.start_at);
+  const end = new Date(row.end_at);
+
+  if (
+    Number.isNaN(start.getTime()) ||
+    Number.isNaN(end.getTime()) ||
+    end <= start
+  ) {
+    return null;
+  }
+
+  return {
+    childName,
+    parentName,
+    parentEmail,
+    parentPhone,
+    serviceName,
+    startAt: row.start_at,
+    endAt: row.end_at,
+    status,
+  };
+}
+
 function getMyUnavailability(
   data: unknown,
   weekStart: string,
@@ -549,16 +625,38 @@ function formatDayDate(value: string) {
     : "";
 }
 
+function formatDetailsDate(value: string) {
+  return detailDateFormatter.format(new Date(value));
+}
+
+function formatDetailsTime(startAt: string, endAt: string) {
+  return `${appointmentTimeFormatter.format(new Date(startAt))}–${appointmentTimeFormatter.format(new Date(endAt))}`;
+}
+
+function getFriendlyStatus(status: string) {
+  if (status === "confirmed") {
+    return "Potvrđen";
+  }
+
+  if (status === "cancelled") {
+    return "Otkazan";
+  }
+
+  return "Nepoznat";
+}
+
 function WeeklyCalendar({
   weekStart,
   workingHours,
   appointments,
   unavailability,
+  onAppointmentClick,
 }: {
   weekStart: string;
   workingHours: WorkingHour[];
   appointments: CalendarAppointment[];
   unavailability: CalendarUnavailability[];
+  onAppointmentClick: (appointmentId: DatabaseId) => void;
 }) {
   const weekDays = WEEKDAY_NAMES.map((name, index) => ({
     name,
@@ -744,9 +842,11 @@ function WeeklyCalendar({
                   }
 
                   return (
-                    <div
+                    <button
+                      type="button"
                       key={String(appointment.id)}
-                      className="absolute inset-x-1.5 z-30 overflow-hidden rounded-xl border border-[#397267]/25 bg-[#dceee5] px-2 py-1 text-[11px] leading-3 text-[#243c38] shadow-[0_5px_14px_rgba(36,60,56,0.1)]"
+                      onClick={() => onAppointmentClick(appointment.id)}
+                      className="absolute inset-x-1.5 z-30 cursor-pointer overflow-hidden rounded-xl border border-[#397267]/25 bg-[#dceee5] px-2 py-1 text-left text-[11px] leading-3 text-[#243c38] shadow-[0_5px_14px_rgba(36,60,56,0.1)] transition hover:border-[#397267]/45 hover:bg-[#d2e9dd] focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-[#397267]"
                       style={{
                         top:
                           (appointmentStart - visibleRange.startMinutes) *
@@ -764,7 +864,7 @@ function WeeklyCalendar({
                       <p className="truncate text-[#526b66]">
                         {appointment.serviceName}
                       </p>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
@@ -787,6 +887,7 @@ async function signOutWithoutThrowing() {
 export default function TherapistPage() {
   const router = useRouter();
   const signOutInProgress = useRef(false);
+  const detailsRequestId = useRef(0);
   const [weekStart, setWeekStart] = useState(getCurrentWeekStart);
   const [therapist, setTherapist] = useState<TherapistContext>();
   const [appointments, setAppointments] = useState<CalendarAppointment[]>([]);
@@ -801,6 +902,12 @@ export default function TherapistPage() {
   const [reloadKey, setReloadKey] = useState(0);
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string>();
+  const [selectedAppointmentId, setSelectedAppointmentId] =
+    useState<DatabaseId | null>(null);
+  const [appointmentDetails, setAppointmentDetails] =
+    useState<AppointmentDetails>();
+  const [isDetailsLoading, setIsDetailsLoading] = useState(false);
+  const [detailsError, setDetailsError] = useState<string>();
 
   useEffect(() => {
     let isActive = true;
@@ -983,6 +1090,56 @@ export default function TherapistPage() {
       isActive = false;
     };
   }, [reloadKey, therapist, weekStart]);
+
+  async function openAppointmentDetails(appointmentId: DatabaseId) {
+    const requestId = detailsRequestId.current + 1;
+    detailsRequestId.current = requestId;
+    setSelectedAppointmentId(appointmentId);
+    setAppointmentDetails(undefined);
+    setDetailsError(undefined);
+    setIsDetailsLoading(true);
+
+    try {
+      const { data, error } = await supabase.rpc(
+        "get_my_appointment_details",
+        {
+          p_appointment_id: appointmentId,
+        },
+      );
+      const loadedDetails = getAppointmentDetails(data, appointmentId);
+
+      if (detailsRequestId.current !== requestId) {
+        return;
+      }
+
+      if (error || !loadedDetails) {
+        setDetailsError(
+          "Detalje termina trenutno nije moguće učitati. Pokušajte ponovo.",
+        );
+        return;
+      }
+
+      setAppointmentDetails(loadedDetails);
+    } catch {
+      if (detailsRequestId.current === requestId) {
+        setDetailsError(
+          "Došlo je do neočekivane greške pri učitavanju detalja.",
+        );
+      }
+    } finally {
+      if (detailsRequestId.current === requestId) {
+        setIsDetailsLoading(false);
+      }
+    }
+  }
+
+  function closeAppointmentDetails() {
+    detailsRequestId.current += 1;
+    setSelectedAppointmentId(null);
+    setAppointmentDetails(undefined);
+    setDetailsError(undefined);
+    setIsDetailsLoading(false);
+  }
 
   function showWeek(nextWeekStart: string) {
     setScheduleError(undefined);
@@ -1211,6 +1368,7 @@ export default function TherapistPage() {
                       workingHours={therapist.workingHours}
                       appointments={appointments}
                       unavailability={unavailability}
+                      onAppointmentClick={openAppointmentDetails}
                     />
                   </div>
                 </>
@@ -1219,6 +1377,161 @@ export default function TherapistPage() {
           ) : null}
         </section>
       </main>
+
+      {selectedAppointmentId !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[#172b27]/45 p-4 backdrop-blur-sm"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeAppointmentDetails();
+            }
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="therapist-appointment-details-title"
+            className="max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-3xl border border-white/80 bg-[#fffaf3] p-6 shadow-[0_28px_90px_rgba(23,43,39,0.28)] sm:p-8"
+          >
+            <div className="flex items-start justify-between gap-5">
+              <div>
+                <p className="text-xs font-semibold tracking-[0.12em] text-[#397267] uppercase">
+                  Terapeut panel
+                </p>
+                <h2
+                  id="therapist-appointment-details-title"
+                  className="mt-2 text-2xl font-semibold tracking-[-0.025em] text-[#243c38] sm:text-3xl"
+                >
+                  Detalji termina
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={closeAppointmentDetails}
+                aria-label="Zatvori detalje termina"
+                className="grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-full border border-[#397267]/15 bg-white text-xl leading-none text-[#397267] transition hover:border-[#397267]/30 hover:bg-[#edf5f0] focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-[#397267]"
+              >
+                ×
+              </button>
+            </div>
+
+            {isDetailsLoading ? (
+              <div
+                role="status"
+                className="mt-8 rounded-2xl border border-[#397267]/12 bg-white/70 px-5 py-8 text-center text-sm font-medium text-[#526b66]"
+              >
+                Učitavanje detalja termina...
+              </div>
+            ) : detailsError ? (
+              <div
+                role="alert"
+                className="mt-8 rounded-2xl border border-[#b45745]/20 bg-[#fff8f5] px-5 py-6 text-center text-sm text-[#8f4033]"
+              >
+                <p>{detailsError}</p>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void openAppointmentDetails(selectedAppointmentId)
+                  }
+                  className="mt-5 min-h-11 rounded-full bg-[#397267] px-5 py-2 text-sm font-semibold text-white transition hover:bg-[#2f6158] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267]"
+                >
+                  Pokušaj ponovo
+                </button>
+              </div>
+            ) : appointmentDetails ? (
+              <>
+                <dl className="mt-8 grid gap-x-8 gap-y-5 sm:grid-cols-2">
+                  <div className="border-b border-[#397267]/10 pb-4">
+                    <dt className="text-xs font-semibold tracking-wide text-[#6b807c] uppercase">
+                      Dete
+                    </dt>
+                    <dd className="mt-1.5 font-semibold text-[#243c38]">
+                      {appointmentDetails.childName}
+                    </dd>
+                  </div>
+                  <div className="border-b border-[#397267]/10 pb-4">
+                    <dt className="text-xs font-semibold tracking-wide text-[#6b807c] uppercase">
+                      Roditelj
+                    </dt>
+                    <dd className="mt-1.5 font-semibold text-[#243c38]">
+                      {appointmentDetails.parentName}
+                    </dd>
+                  </div>
+                  <div className="border-b border-[#397267]/10 pb-4">
+                    <dt className="text-xs font-semibold tracking-wide text-[#6b807c] uppercase">
+                      Telefon
+                    </dt>
+                    <dd className="mt-1.5 font-medium text-[#243c38]">
+                      {appointmentDetails.parentPhone}
+                    </dd>
+                  </div>
+                  <div className="border-b border-[#397267]/10 pb-4">
+                    <dt className="text-xs font-semibold tracking-wide text-[#6b807c] uppercase">
+                      Email
+                    </dt>
+                    <dd className="mt-1.5 break-all font-medium text-[#243c38]">
+                      {appointmentDetails.parentEmail}
+                    </dd>
+                  </div>
+                  <div className="border-b border-[#397267]/10 pb-4 sm:col-span-2">
+                    <dt className="text-xs font-semibold tracking-wide text-[#6b807c] uppercase">
+                      Usluga
+                    </dt>
+                    <dd className="mt-1.5 font-medium text-[#243c38]">
+                      {appointmentDetails.serviceName}
+                    </dd>
+                  </div>
+                  <div className="border-b border-[#397267]/10 pb-4">
+                    <dt className="text-xs font-semibold tracking-wide text-[#6b807c] uppercase">
+                      Datum
+                    </dt>
+                    <dd className="mt-1.5 capitalize font-medium text-[#243c38]">
+                      {formatDetailsDate(appointmentDetails.startAt)}
+                    </dd>
+                  </div>
+                  <div className="border-b border-[#397267]/10 pb-4">
+                    <dt className="text-xs font-semibold tracking-wide text-[#6b807c] uppercase">
+                      Vreme
+                    </dt>
+                    <dd className="mt-1.5 font-medium text-[#243c38]">
+                      {formatDetailsTime(
+                        appointmentDetails.startAt,
+                        appointmentDetails.endAt,
+                      )}
+                    </dd>
+                  </div>
+                  <div className="pb-2 sm:col-span-2">
+                    <dt className="text-xs font-semibold tracking-wide text-[#6b807c] uppercase">
+                      Status
+                    </dt>
+                    <dd className="mt-2">
+                      <span
+                        className={`inline-flex rounded-full px-3 py-1 text-sm font-semibold ${
+                          appointmentDetails.status === "cancelled"
+                            ? "bg-[#f7dfd7] text-[#914b3b]"
+                            : "bg-[#dceee5] text-[#2f6158]"
+                        }`}
+                      >
+                        {getFriendlyStatus(appointmentDetails.status)}
+                      </span>
+                    </dd>
+                  </div>
+                </dl>
+
+                <div className="mt-7 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={closeAppointmentDetails}
+                    className="min-h-11 rounded-full bg-[#397267] px-6 py-2 text-sm font-semibold text-white transition hover:bg-[#2f6158] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267]"
+                  >
+                    Zatvori
+                  </button>
+                </div>
+              </>
+            ) : null}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
