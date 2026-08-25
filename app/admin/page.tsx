@@ -1113,6 +1113,35 @@ async function sendTherapistCancellationNotification(cancelToken: string) {
   }
 }
 
+async function processReleasedAppointmentForWaitlist(
+  appointment: CreatedAppointmentResult,
+) {
+  try {
+    const response = await fetch("/api/process-waitlist-release", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        appointmentId: appointment.appointmentId,
+        cancelToken: appointment.cancelToken,
+      }),
+    });
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const result: unknown = await response.json();
+
+    return Boolean(
+      result &&
+        typeof result === "object" &&
+        (result as Record<string, unknown>).success === true,
+    );
+  } catch {
+    return false;
+  }
+}
+
 function getVisibleTimeRange(workingHours: WorkingHour[]) {
   if (workingHours.length === 0) {
     return { startMinutes: 8 * 60, endMinutes: 18 * 60 };
@@ -2631,6 +2660,7 @@ export default function AdminPage() {
         sendTherapistCancellationNotification(
           cancelledAppointment.cancelToken,
         ),
+        processReleasedAppointmentForWaitlist(cancelledAppointment),
       ]);
 
     if (!parentNotificationSent || !therapistNotificationSent) {

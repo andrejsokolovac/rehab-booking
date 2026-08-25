@@ -18,11 +18,17 @@ export type UnavailabilityBlock = {
   end_at: string;
 };
 
+export type WaitlistHold = {
+  start_at: string;
+  blocked_until: string;
+};
+
 export type TherapistSchedule = {
   therapistId: number;
   workingHours: WorkingHour[];
   bookedSlots: BookedSlot[];
   unavailabilityBlocks: UnavailabilityBlock[];
+  waitlistHolds: WaitlistHold[];
 };
 
 const blockedDateTimeFormatter = new Intl.DateTimeFormat("en-CA", {
@@ -208,6 +214,32 @@ export function conflictsWithUnavailability(
   );
 }
 
+export function conflictsWithWaitlistHolds(
+  dateValue: string,
+  startMinutes: number,
+  durationMinutes: number,
+  waitlistHolds: WaitlistHold[],
+) {
+  const candidate = candidateBlockedInterval(
+    dateValue,
+    startMinutes,
+    durationMinutes,
+  );
+
+  if (!candidate) {
+    return true;
+  }
+
+  return waitlistHolds.some((hold) =>
+    intervalOverlaps(
+      candidate.start,
+      candidate.blockedUntil,
+      hold.start_at,
+      hold.blocked_until,
+    ),
+  );
+}
+
 export function isTimeAvailableForSchedule(
   schedule: TherapistSchedule,
   durationMinutes: number,
@@ -252,6 +284,12 @@ export function isTimeAvailableForSchedule(
       startMinutes,
       durationMinutes,
       schedule.unavailabilityBlocks,
+    ) &&
+    !conflictsWithWaitlistHolds(
+      dateValue,
+      startMinutes,
+      durationMinutes,
+      schedule.waitlistHolds,
     )
   );
 }
@@ -303,6 +341,12 @@ export function generateTimeSlots(
             start,
             durationMinutes,
             schedule.unavailabilityBlocks,
+          ) &&
+          !conflictsWithWaitlistHolds(
+            dateValue,
+            start,
+            durationMinutes,
+            schedule.waitlistHolds,
           )
         ) {
           starts.add(start);

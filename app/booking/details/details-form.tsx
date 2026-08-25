@@ -4,8 +4,10 @@ import { useRouter } from "next/navigation";
 import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import {
   conflictsWithUnavailability,
+  conflictsWithWaitlistHolds,
   parseTime,
   type UnavailabilityBlock,
+  type WaitlistHold,
 } from "@/lib/booking-availability";
 import { supabase } from "@/lib/supabase";
 
@@ -213,23 +215,34 @@ async function therapistIsAvailable(
     return null;
   }
 
-  const { data, error } = await supabase.rpc(
-    "get_therapist_unavailability",
-    {
+  const [unavailabilityResult, waitlistHoldsResult] = await Promise.all([
+    supabase.rpc("get_therapist_unavailability", {
       p_therapist_id: therapistId,
       p_date: date,
-    },
-  );
+    }),
+    supabase.rpc("get_active_waitlist_holds", {
+      p_therapist_id: therapistId,
+      p_date: date,
+    }),
+  ]);
 
-  if (error) {
+  if (unavailabilityResult.error || waitlistHoldsResult.error) {
     return null;
   }
 
-  return !conflictsWithUnavailability(
-    date,
-    startMinutes,
-    durationMinutes,
-    (data ?? []) as UnavailabilityBlock[],
+  return (
+    !conflictsWithUnavailability(
+      date,
+      startMinutes,
+      durationMinutes,
+      (unavailabilityResult.data ?? []) as UnavailabilityBlock[],
+    ) &&
+    !conflictsWithWaitlistHolds(
+      date,
+      startMinutes,
+      durationMinutes,
+      (waitlistHoldsResult.data ?? []) as WaitlistHold[],
+    )
   );
 }
 

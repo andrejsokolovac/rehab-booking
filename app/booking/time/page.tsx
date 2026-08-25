@@ -6,6 +6,7 @@ import {
   type BookedSlot,
   type TherapistSchedule,
   type UnavailabilityBlock,
+  type WaitlistHold,
   type WorkingHour,
 } from "@/lib/booking-availability";
 
@@ -194,15 +195,25 @@ async function loadTimeAvailability(
         }),
       ),
     );
+    const waitlistHoldsRequest = Promise.all(
+      therapistIds.map((therapistId) =>
+        supabase.rpc("get_active_waitlist_holds", {
+          p_therapist_id: therapistId,
+          p_date: selectedDate.value,
+        }),
+      ),
+    );
 
     const [
       workingHoursResult,
       bookedSlotsResults,
       unavailabilityResults,
+      waitlistHoldsResults,
     ] = await Promise.all([
       workingHoursRequest,
       bookedSlotsRequest,
       unavailabilityRequest,
+      waitlistHoldsRequest,
     ]);
 
     const workingHours =
@@ -213,6 +224,9 @@ async function loadTimeAvailability(
     const hasUnavailabilityError = unavailabilityResults.some(
       (result) => result.error,
     );
+    const hasWaitlistHoldsError = waitlistHoldsResults.some(
+      (result) => result.error,
+    );
     const therapistSchedules = therapistIds.map((therapistId, index) => ({
       therapistId,
       workingHours: workingHours.filter(
@@ -221,6 +235,7 @@ async function loadTimeAvailability(
       bookedSlots: (bookedSlotsResults[index].data ?? []) as BookedSlot[],
       unavailabilityBlocks: (unavailabilityResults[index].data ??
         []) as UnavailabilityBlock[],
+      waitlistHolds: (waitlistHoldsResults[index].data ?? []) as WaitlistHold[],
     }));
 
     return {
@@ -230,7 +245,8 @@ async function loadTimeAvailability(
       hasError: Boolean(
         workingHoursResult.error ||
           hasBookedSlotsError ||
-          hasUnavailabilityError,
+          hasUnavailabilityError ||
+          hasWaitlistHoldsError,
       ),
     };
   }
@@ -259,8 +275,12 @@ async function loadTimeAvailability(
     };
   }
 
-  const [workingHoursResult, bookedSlotsResult, unavailabilityResult] =
-    await Promise.all([
+  const [
+    workingHoursResult,
+    bookedSlotsResult,
+    unavailabilityResult,
+    waitlistHoldsResult,
+  ] = await Promise.all([
       supabase
         .from("working_hours")
         .select("start_time, end_time")
@@ -272,6 +292,10 @@ async function loadTimeAvailability(
         p_date: selectedDate.value,
       }),
       supabase.rpc("get_therapist_unavailability", {
+        p_therapist_id: selectedTherapist.id,
+        p_date: selectedDate.value,
+      }),
+      supabase.rpc("get_active_waitlist_holds", {
         p_therapist_id: selectedTherapist.id,
         p_date: selectedDate.value,
       }),
@@ -287,12 +311,14 @@ async function loadTimeAvailability(
         bookedSlots: (bookedSlotsResult.data ?? []) as BookedSlot[],
         unavailabilityBlocks: (unavailabilityResult.data ??
           []) as UnavailabilityBlock[],
+        waitlistHolds: (waitlistHoldsResult.data ?? []) as WaitlistHold[],
       },
     ],
     hasError: Boolean(
       workingHoursResult.error ||
-        bookedSlotsResult.error ||
-        unavailabilityResult.error,
+      bookedSlotsResult.error ||
+        unavailabilityResult.error ||
+        waitlistHoldsResult.error,
     ),
   };
 }
@@ -350,6 +376,16 @@ export default async function TimePage({ searchParams }: TimePageProps) {
             service: selectedService.slug,
             therapist: selectedTherapist.slug,
             date: selectedDate.value,
+          },
+        }
+      : "/booking";
+  const waitlistHref =
+    selectedService && selectedTherapist
+      ? {
+          pathname: "/booking/waitlist",
+          query: {
+            service: selectedService.slug,
+            therapist: selectedTherapist.slug,
           },
         }
       : "/booking";
@@ -512,6 +548,30 @@ export default async function TimePage({ searchParams }: TimePageProps) {
                   )}
                 </>
               )}
+
+              <div
+                className={`mt-10 rounded-3xl border p-6 shadow-[0_12px_35px_rgba(36,60,56,0.05)] sm:flex sm:items-center sm:justify-between sm:gap-8 ${
+                  !hasError && timeSlots.length === 0
+                    ? "border-[#d89a58]/30 bg-[#fff4e5]"
+                    : "border-[#397267]/12 bg-white/65"
+                }`}
+              >
+                <div>
+                  <h2 className="text-lg font-semibold text-[#243c38]">
+                    Nema termina koji vam odgovara?
+                  </h2>
+                  <p className="mt-2 max-w-2xl text-sm leading-6 text-[#6b807c]">
+                    Prijavite se na listu čekanja i kontaktiraćemo vas ako se
+                    pojavi termin koji odgovara vašim željama.
+                  </p>
+                </div>
+                <Link
+                  href={waitlistHref}
+                  className="mt-5 inline-flex min-h-12 w-full shrink-0 items-center justify-center rounded-full border border-[#397267]/25 bg-white px-6 py-3 text-sm font-semibold text-[#397267] transition hover:border-[#397267]/45 hover:bg-[#edf5f0] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267] sm:mt-0 sm:w-auto"
+                >
+                  Prijavi me na listu čekanja
+                </Link>
+              </div>
             </>
           ) : (
             <div

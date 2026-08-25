@@ -6,6 +6,7 @@ import {
   type BookedSlot,
   type TherapistSchedule,
   type UnavailabilityBlock,
+  type WaitlistHold,
   type WorkingHour,
 } from "@/lib/booking-availability";
 import { supabase } from "@/lib/supabase";
@@ -251,8 +252,12 @@ async function loadBookingSelection(
       };
     }
 
-    const [workingHoursResult, bookedSlotsResult, unavailabilityResult] =
-      await Promise.all([
+    const [
+      workingHoursResult,
+      bookedSlotsResult,
+      unavailabilityResult,
+      waitlistHoldsResult,
+    ] = await Promise.all([
         supabase
           .from("working_hours")
           .select("start_time, end_time")
@@ -266,6 +271,10 @@ async function loadBookingSelection(
           p_therapist_id: selectedTherapist.id,
           p_date: dateValue,
         }),
+        supabase.rpc("get_active_waitlist_holds", {
+          p_therapist_id: selectedTherapist.id,
+          p_date: dateValue,
+        }),
       ]);
     const schedule: TherapistSchedule = {
       therapistId: selectedTherapist.id,
@@ -273,11 +282,13 @@ async function loadBookingSelection(
       bookedSlots: (bookedSlotsResult.data ?? []) as BookedSlot[],
       unavailabilityBlocks: (unavailabilityResult.data ??
         []) as UnavailabilityBlock[],
+      waitlistHolds: (waitlistHoldsResult.data ?? []) as WaitlistHold[],
     };
     const hasAvailabilityError = Boolean(
       workingHoursResult.error ||
         bookedSlotsResult.error ||
-        unavailabilityResult.error,
+        unavailabilityResult.error ||
+        waitlistHoldsResult.error,
     );
     const isAvailable =
       !hasAvailabilityError &&
@@ -328,8 +339,12 @@ async function loadBookingSelection(
     };
   }
 
-  const [workingHoursResult, bookedSlotsResults, unavailabilityResults] =
-    await Promise.all([
+  const [
+    workingHoursResult,
+    bookedSlotsResults,
+    unavailabilityResults,
+    waitlistHoldsResults,
+  ] = await Promise.all([
       supabase
         .from("working_hours")
         .select("therapist_id, start_time, end_time")
@@ -351,11 +366,20 @@ async function loadBookingSelection(
           }),
         ),
       ),
+      Promise.all(
+        therapistIds.map((therapistId) =>
+          supabase.rpc("get_active_waitlist_holds", {
+            p_therapist_id: therapistId,
+            p_date: dateValue,
+          }),
+        ),
+      ),
     ]);
   const hasAvailabilityError = Boolean(
     workingHoursResult.error ||
       bookedSlotsResults.some((result) => result.error) ||
-      unavailabilityResults.some((result) => result.error),
+      unavailabilityResults.some((result) => result.error) ||
+      waitlistHoldsResults.some((result) => result.error),
   );
 
   if (hasAvailabilityError) {
@@ -377,6 +401,7 @@ async function loadBookingSelection(
     bookedSlots: (bookedSlotsResults[index].data ?? []) as BookedSlot[],
     unavailabilityBlocks: (unavailabilityResults[index].data ??
       []) as UnavailabilityBlock[],
+    waitlistHolds: (waitlistHoldsResults[index].data ?? []) as WaitlistHold[],
   }));
   const eligibleTherapistIds = therapistSchedules
     .filter((schedule) =>

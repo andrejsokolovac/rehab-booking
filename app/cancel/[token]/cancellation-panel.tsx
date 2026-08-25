@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { processPublicCancellationForWaitlist } from "./waitlist-release-action";
 
 type CancellationPanelProps = {
   token: string;
@@ -51,6 +52,14 @@ async function sendTherapistCancellationNotification(cancelToken: string) {
   }
 }
 
+async function processReleasedAppointmentForWaitlist(cancelToken: string) {
+  try {
+    return await processPublicCancellationForWaitlist(cancelToken);
+  } catch {
+    return false;
+  }
+}
+
 export default function CancellationPanel({
   token,
   appointment,
@@ -86,7 +95,10 @@ export default function CancellationPanel({
       }
 
       setStatus("cancelled");
-      await sendTherapistCancellationNotification(token);
+      await Promise.all([
+        sendTherapistCancellationNotification(token),
+        processReleasedAppointmentForWaitlist(token),
+      ]);
     } catch {
       setRequestError(
         "Termin trenutno nije moguće otkazati. Pokušajte ponovo kasnije.",

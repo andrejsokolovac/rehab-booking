@@ -1,10 +1,13 @@
 import { Resend } from "resend";
 
+import { supabaseAdmin } from "@/lib/supabase-admin";
+
 export const runtime = "nodejs";
 
 const appBaseUrl = (
   process.env.APP_BASE_URL || "http://localhost:3000"
 ).replace(/\/+$/, "");
+const BELGRADE_TIME_ZONE = "Europe/Belgrade";
 const CENTER_ADDRESS = "Bulevar Vojvode Stepe 133, Novi Sad";
 const GOOGLE_MAPS_URL = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
   CENTER_ADDRESS,
@@ -12,6 +15,12 @@ const GOOGLE_MAPS_URL = `https://www.google.com/maps/search/?api=1&query=${encod
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const APPOINTMENT_REQUEST_FIELDS = new Set([
+  "appointmentId",
+  "cancelToken",
+]);
+
+type DatabaseId = number | string;
 
 type BookingConfirmationPayload = {
   email: string;
@@ -21,6 +30,26 @@ type BookingConfirmationPayload = {
   time: string;
   cancelToken: string;
 };
+
+type AppointmentConfirmationRequest = {
+  appointmentId: DatabaseId;
+  cancelToken: string;
+};
+
+const dateFormatter = new Intl.DateTimeFormat("sr-Latn-RS", {
+  weekday: "long",
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+  timeZone: BELGRADE_TIME_ZONE,
+});
+
+const timeFormatter = new Intl.DateTimeFormat("sr-Latn-RS", {
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+  timeZone: BELGRADE_TIME_ZONE,
+});
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Nepoznata greška.";
@@ -61,6 +90,75 @@ function getPayload(body: unknown): BookingConfirmationPayload | null {
   }
 
   return values;
+}
+
+function getDatabaseId(value: unknown): DatabaseId | null {
+  if (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0
+  ) {
+    return value;
+  }
+
+  if (typeof value === "string" && /^[1-9]\d*$/.test(value)) {
+    return value;
+  }
+
+  return null;
+}
+
+function getAppointmentRequest(
+  body: unknown,
+): AppointmentConfirmationRequest | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return null;
+  }
+
+  const data = body as Record<string, unknown>;
+  const fields = Object.keys(data);
+
+  if (
+    fields.length !== APPOINTMENT_REQUEST_FIELDS.size ||
+    fields.some((field) => !APPOINTMENT_REQUEST_FIELDS.has(field))
+  ) {
+    return null;
+  }
+
+  const appointmentId = getDatabaseId(data.appointmentId);
+  const cancelToken =
+    typeof data.cancelToken === "string" ? data.cancelToken.trim() : "";
+
+  if (appointmentId === null || !UUID_PATTERN.test(cancelToken)) {
+    return null;
+  }
+
+  return { appointmentId, cancelToken };
+}
+
+function getNonEmptyString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function formatAppointmentDateTime(startAt: unknown) {
+  if (typeof startAt !== "string") {
+    return null;
+  }
+
+  const start = new Date(startAt);
+
+  if (Number.isNaN(start.getTime())) {
+    return null;
+  }
+
+  const formattedDate = dateFormatter.format(start);
+
+  return {
+    date:
+      formattedDate.charAt(0).toLocaleUpperCase("sr-Latn-RS") +
+      formattedDate.slice(1),
+    time: timeFormatter.format(start),
+  };
 }
 
 function createEmailHtml(
@@ -136,13 +234,97 @@ export async function POST(request: Request) {
     );
   }
 
-  const payload = getPayload(body);
+  let payload = getPayload(body);
 
   if (!payload) {
-    return Response.json(
-      { success: false, error: "Nedostaju obavezni podaci." },
-      { status: 400 },
+    const appointmentRequest = getAppointmentRequest(body);
+
+    if (!appointmentRequest) {
+      return Response.json(
+        { success: false, error: "Nedostaju obavezni podaci." },
+        { status: 400 },
+      );
+    }
+
+    const { data: appointment, error: appointmentError } = await supabaseAdmin
+      .from("appointments")
+      .select("id, therapist_id, service_id, email, start_at, status")
+      .eq("id", appointmentRequest.appointmentId)
+      .eq("cancel_token", appointmentRequest.cancelToken)
+      .maybeSingle();
+
+    if (appointmentError) {
+      return Response.json(
+        { success: false, error: "Termin trenutno nije moguće proveriti." },
+        { status: 500 },
+      );
+    }
+
+    if (!appointment || appointment.status !== "confirmed") {
+      return Response.json(
+        { success: false, error: "Termin nije pronađen ili nije dostupan." },
+        { status: 404 },
+      );
+    }
+
+    const therapistId = getDatabaseId(appointment.therapist_id);
+    const serviceId = getDatabaseId(appointment.service_id);
+    const parentEmail = getNonEmptyString(appointment.email);
+    const appointmentDateTime = formatAppointmentDateTime(
+      appointment.start_at,
     );
+
+    if (
+      therapistId === null ||
+      serviceId === null ||
+      !parentEmail ||
+      !EMAIL_PATTERN.test(parentEmail) ||
+      !appointmentDateTime
+    ) {
+      return Response.json(
+        { success: false, error: "Podaci za potvrdu nisu ispravni." },
+        { status: 500 },
+      );
+    }
+
+    const [therapistResult, serviceResult] = await Promise.all([
+      supabaseAdmin
+        .from("therapists")
+        .select("name")
+        .eq("id", therapistId)
+        .maybeSingle(),
+      supabaseAdmin
+        .from("services")
+        .select("name")
+        .eq("id", serviceId)
+        .maybeSingle(),
+    ]);
+
+    if (therapistResult.error || serviceResult.error) {
+      return Response.json(
+        { success: false, error: "Podatke za potvrdu nije moguće učitati." },
+        { status: 500 },
+      );
+    }
+
+    const therapistName = getNonEmptyString(therapistResult.data?.name);
+    const serviceName = getNonEmptyString(serviceResult.data?.name);
+
+    if (!therapistName || !serviceName) {
+      return Response.json(
+        { success: false, error: "Podaci za potvrdu nisu ispravni." },
+        { status: 500 },
+      );
+    }
+
+    payload = {
+      email: parentEmail,
+      serviceName,
+      therapistName,
+      date: appointmentDateTime.date,
+      time: appointmentDateTime.time,
+      cancelToken: appointmentRequest.cancelToken,
+    };
   }
 
   if (!EMAIL_PATTERN.test(payload.email) || !UUID_PATTERN.test(payload.cancelToken)) {
