@@ -26,6 +26,11 @@ type FieldName = "parentName" | "childName" | "email" | "phone";
 
 type FormValues = Record<FieldName, string>;
 
+type CreatedAppointmentResult = {
+  appointmentId: string;
+  cancelToken: string;
+};
+
 const fields: Array<{
   name: FieldName;
   label: string;
@@ -68,6 +73,38 @@ const initialValues: FormValues = {
 const BOOKING_CONFLICT_ERROR = "Termin je u međuvremenu rezervisan.";
 const BOOKING_CONFLICT_MESSAGE =
   "Termin je u međuvremenu rezervisan. Izaberite drugi termin.";
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function getCreatedAppointmentResult(
+  data: unknown,
+): CreatedAppointmentResult | null {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+
+  const row = data as Record<string, unknown>;
+  const appointmentId = row.appointment_id;
+  const cancelToken = row.cancel_token;
+  const appointmentIdIsValid =
+    (typeof appointmentId === "number" &&
+      Number.isInteger(appointmentId) &&
+      appointmentId > 0) ||
+    (typeof appointmentId === "string" && /^[1-9]\d*$/.test(appointmentId));
+
+  if (
+    !appointmentIdIsValid ||
+    typeof cancelToken !== "string" ||
+    !UUID_PATTERN.test(cancelToken)
+  ) {
+    return null;
+  }
+
+  return {
+    appointmentId: String(appointmentId),
+    cancelToken,
+  };
+}
 
 function getFieldError(name: FieldName, value: string) {
   const trimmedValue = value.trim();
@@ -158,17 +195,20 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
       let bookingConflictOccurred = false;
 
       for (const therapist of booking.therapistCandidates) {
-        const { error } = await supabase.rpc("create_appointment", {
-          p_therapist_id: therapist.id,
-          p_service_id: booking.serviceId,
-          p_start_at: booking.startAt,
-          p_parent_name: values.parentName.trim(),
-          p_child_name: values.childName.trim(),
-          p_email: values.email.trim(),
-          p_phone: values.phone.trim(),
-        });
+        const { data, error } = await supabase
+          .rpc("create_appointment", {
+            p_therapist_id: therapist.id,
+            p_service_id: booking.serviceId,
+            p_start_at: booking.startAt,
+            p_parent_name: values.parentName.trim(),
+            p_child_name: values.childName.trim(),
+            p_email: values.email.trim(),
+            p_phone: values.phone.trim(),
+          })
+          .single();
+        const createdAppointment = getCreatedAppointmentResult(data);
 
-        if (!error) {
+        if (!error && createdAppointment) {
           const confirmationParams = new URLSearchParams({
             service: booking.serviceSlug,
             therapist: therapist.slug,
@@ -179,6 +219,14 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
           router.push(
             `/booking/confirmation?${confirmationParams.toString()}`,
           );
+          return;
+        }
+
+        if (!error) {
+          setSubmitError(
+            "Termin je kreiran, ali potvrdu trenutno nije moguće prikazati. Kontaktirajte centar pre ponovnog pokušaja.",
+          );
+          setIsSubmitting(false);
           return;
         }
 
