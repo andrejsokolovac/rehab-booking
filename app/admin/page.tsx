@@ -2,13 +2,22 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+} from "react";
 
 import { supabase } from "@/lib/supabase";
 
 const BELGRADE_TIME_ZONE = "Europe/Belgrade";
+const APPOINTMENT_BUFFER_MINUTES = 15;
 const PIXELS_PER_MINUTE = 1.5;
 const CALENDAR_VERTICAL_PADDING = 16;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type DatabaseId = number | string;
 
@@ -46,6 +55,46 @@ type AppointmentDetails = {
   endAt: string;
   status: string;
   createdAt: string;
+};
+
+type Service = {
+  id: DatabaseId;
+  name: string;
+  durationMinutes: number;
+};
+
+type BookedSlot = {
+  startAt: string;
+  blockedUntil: string;
+};
+
+type CreatedAppointmentResult = {
+  appointmentId: string;
+  cancelToken: string;
+};
+
+type ManualBookingValues = {
+  therapistId: string;
+  serviceId: string;
+  date: string;
+  time: string;
+  parentName: string;
+  childName: string;
+  email: string;
+  phone: string;
+};
+
+type ManualBookingField = keyof ManualBookingValues;
+
+const initialManualBookingValues: ManualBookingValues = {
+  therapistId: "",
+  serviceId: "",
+  date: "",
+  time: "",
+  parentName: "",
+  childName: "",
+  email: "",
+  phone: "",
 };
 
 type CalendarDateParts = {
@@ -505,6 +554,359 @@ function getAppointmentDetails(
   };
 }
 
+function getLinkedServiceIds(data: unknown): DatabaseId[] | null {
+  if (!Array.isArray(data)) {
+    return null;
+  }
+
+  const serviceIds: DatabaseId[] = [];
+
+  for (const value of data) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+
+    const serviceId = getDatabaseId(
+      (value as Record<string, unknown>).service_id,
+    );
+
+    if (serviceId === null) {
+      return null;
+    }
+
+    if (!serviceIds.some((currentId) => idsMatch(currentId, serviceId))) {
+      serviceIds.push(serviceId);
+    }
+  }
+
+  return serviceIds;
+}
+
+function getServices(data: unknown): Service[] | null {
+  if (!Array.isArray(data)) {
+    return null;
+  }
+
+  const services: Service[] = [];
+
+  for (const value of data) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+
+    const row = value as Record<string, unknown>;
+    const id = getDatabaseId(row.id);
+    const name = getNonEmptyString(row.name);
+    const durationMinutes = row.duration_minutes;
+
+    if (
+      id === null ||
+      !name ||
+      typeof durationMinutes !== "number" ||
+      !Number.isInteger(durationMinutes) ||
+      durationMinutes <= 0
+    ) {
+      return null;
+    }
+
+    services.push({ id, name, durationMinutes });
+  }
+
+  return services;
+}
+
+function getBookedCalendarTimestamp(value: string) {
+  const localTimestampMatch = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/,
+  );
+
+  if (localTimestampMatch) {
+    const [, year, month, day, hour, minute, second = "0"] =
+      localTimestampMatch;
+
+    return Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second),
+    );
+  }
+
+  const instant = new Date(value);
+
+  if (Number.isNaN(instant.getTime())) {
+    return null;
+  }
+
+  const parts = getZonedDateTimeParts(instant);
+
+  return Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second,
+  );
+}
+
+function getBookedSlots(data: unknown): BookedSlot[] | null {
+  if (!Array.isArray(data)) {
+    return null;
+  }
+
+  const bookedSlots: BookedSlot[] = [];
+
+  for (const value of data) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+
+    const row = value as Record<string, unknown>;
+
+    if (
+      typeof row.start_at !== "string" ||
+      typeof row.blocked_until !== "string" ||
+      getBookedCalendarTimestamp(row.start_at) === null ||
+      getBookedCalendarTimestamp(row.blocked_until) === null
+    ) {
+      return null;
+    }
+
+    bookedSlots.push({
+      startAt: row.start_at,
+      blockedUntil: row.blocked_until,
+    });
+  }
+
+  return bookedSlots;
+}
+
+function getLocalCalendarTimestamp(dateValue: string, totalMinutes: number) {
+  const parts = parseCalendarDate(dateValue);
+
+  if (!parts) {
+    return null;
+  }
+
+  return (
+    Date.UTC(parts.year, parts.month - 1, parts.day) + totalMinutes * 60_000
+  );
+}
+
+function generateAvailableTimes({
+  date,
+  durationMinutes,
+  workingHours,
+  bookedSlots,
+}: {
+  date: string;
+  durationMinutes: number;
+  workingHours: WorkingHour[];
+  bookedSlots: BookedSlot[];
+}) {
+  if (
+    !parseCalendarDate(date) ||
+    !Number.isInteger(durationMinutes) ||
+    durationMinutes <= 0
+  ) {
+    return [];
+  }
+
+  const availableStarts = new Set<number>();
+  const startIntervalMinutes =
+    durationMinutes + APPOINTMENT_BUFFER_MINUTES;
+
+  for (const workingHour of workingHours) {
+    for (
+      let start = workingHour.startMinutes;
+      start + durationMinutes <= workingHour.endMinutes;
+      start += startIntervalMinutes
+    ) {
+      const candidateStart = getLocalCalendarTimestamp(date, start);
+      const candidateStartAt = toBelgradeInstant(date, start);
+
+      if (
+        candidateStart === null ||
+        !candidateStartAt ||
+        new Date(candidateStartAt).getTime() <= Date.now()
+      ) {
+        continue;
+      }
+
+      const candidateBlockedUntil =
+        candidateStart +
+        (durationMinutes + APPOINTMENT_BUFFER_MINUTES) * 60_000;
+      const hasConflict = bookedSlots.some((bookedSlot) => {
+        const bookedStart = getBookedCalendarTimestamp(bookedSlot.startAt);
+        const bookedBlockedUntil = getBookedCalendarTimestamp(
+          bookedSlot.blockedUntil,
+        );
+
+        return (
+          bookedStart === null ||
+          bookedBlockedUntil === null ||
+          (candidateStart < bookedBlockedUntil &&
+            candidateBlockedUntil > bookedStart)
+        );
+      });
+
+      if (!hasConflict) {
+        availableStarts.add(start);
+      }
+    }
+  }
+
+  return [...availableStarts]
+    .sort((first, second) => first - second)
+    .map(formatTime);
+}
+
+function getCreatedAppointmentResult(
+  data: unknown,
+): CreatedAppointmentResult | null {
+  const value = Array.isArray(data) ? data[0] : data;
+
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const row = value as Record<string, unknown>;
+  const appointmentId = getDatabaseId(row.appointment_id);
+  const cancelToken = row.cancel_token;
+
+  if (
+    appointmentId === null ||
+    typeof cancelToken !== "string" ||
+    !UUID_PATTERN.test(cancelToken)
+  ) {
+    return null;
+  }
+
+  return {
+    appointmentId: String(appointmentId),
+    cancelToken,
+  };
+}
+
+function getManualFieldError(
+  field: ManualBookingField,
+  value: string,
+  today: string,
+) {
+  const trimmedValue = value.trim();
+
+  if (!trimmedValue) {
+    const requiredMessages: Record<ManualBookingField, string> = {
+      therapistId: "Izaberite terapeuta.",
+      serviceId: "Izaberite uslugu.",
+      date: "Izaberite datum.",
+      time: "Izaberite slobodan termin.",
+      parentName: "Unesite ime i prezime roditelja.",
+      childName: "Unesite ime i prezime deteta.",
+      email: "Unesite email adresu.",
+      phone: "Unesite broj telefona.",
+    };
+
+    return requiredMessages[field];
+  }
+
+  if (field === "date") {
+    if (!parseCalendarDate(trimmedValue)) {
+      return "Izaberite ispravan datum.";
+    }
+
+    if (trimmedValue < today) {
+      return "Nije moguće zakazati termin u prošlosti.";
+    }
+  }
+
+  if (
+    field === "email" &&
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedValue)
+  ) {
+    return "Unesite ispravnu email adresu.";
+  }
+
+  if (
+    field === "phone" &&
+    !/^\+?[0-9][0-9\s()./-]{5,}$/.test(trimmedValue)
+  ) {
+    return "Unesite ispravan broj telefona.";
+  }
+
+  return undefined;
+}
+
+async function sendManualBookingConfirmationEmail({
+  email,
+  serviceName,
+  therapistName,
+  date,
+  time,
+  cancelToken,
+}: {
+  email: string;
+  serviceName: string;
+  therapistName: string;
+  date: string;
+  time: string;
+  cancelToken: string;
+}) {
+  try {
+    const response = await fetch("/api/send-booking-confirmation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email,
+        serviceName,
+        therapistName,
+        date,
+        time,
+        cancelToken,
+      }),
+    });
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const result: unknown = await response.json();
+
+    return Boolean(
+      result &&
+        typeof result === "object" &&
+        (result as Record<string, unknown>).success === true,
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function sendManualTherapistNotification(
+  appointment: CreatedAppointmentResult,
+) {
+  try {
+    const response = await fetch(
+      "/api/send-therapist-booking-notification",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          appointmentId: appointment.appointmentId,
+          cancelToken: appointment.cancelToken,
+        }),
+      },
+    );
+
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 function getVisibleTimeRange(workingHours: WorkingHour[]) {
   if (workingHours.length === 0) {
     return { startMinutes: 8 * 60, endMinutes: 18 * 60 };
@@ -758,6 +1160,764 @@ function DailyCalendar({
   );
 }
 
+function NewAppointmentModal({
+  therapists,
+  onClose,
+  onCreated,
+}: {
+  therapists: Therapist[];
+  onClose: () => void;
+  onCreated: (notificationsSucceeded: boolean) => void;
+}) {
+  const servicesRequestId = useRef(0);
+  const availabilityRequestId = useRef(0);
+  const submissionInProgress = useRef(false);
+  const [values, setValues] = useState<ManualBookingValues>(
+    initialManualBookingValues,
+  );
+  const [services, setServices] = useState<Service[]>([]);
+  const [availableTimes, setAvailableTimes] = useState<string[]>([]);
+  const [errors, setErrors] = useState<
+    Partial<Record<ManualBookingField, string>>
+  >({});
+  const [servicesError, setServicesError] = useState<string>();
+  const [availabilityError, setAvailabilityError] = useState<string>();
+  const [submitError, setSubmitError] = useState<string>();
+  const [isServicesLoading, setIsServicesLoading] = useState(false);
+  const [isAvailabilityLoading, setIsAvailabilityLoading] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isSendingNotifications, setIsSendingNotifications] = useState(false);
+  const today = getCurrentBelgradeCalendarDate();
+
+  useEffect(() => {
+    return () => {
+      servicesRequestId.current += 1;
+      availabilityRequestId.current += 1;
+    };
+  }, []);
+
+  function clearFieldErrors(...fields: ManualBookingField[]) {
+    setErrors((currentErrors) => {
+      const nextErrors = { ...currentErrors };
+
+      fields.forEach((field) => {
+        delete nextErrors[field];
+      });
+
+      return nextErrors;
+    });
+  }
+
+  async function loadServicesForTherapist(therapistId: DatabaseId) {
+    const requestId = servicesRequestId.current + 1;
+    servicesRequestId.current = requestId;
+
+    try {
+      const { data: linksData, error: linksError } = await supabase
+        .from("therapist_services")
+        .select("service_id")
+        .eq("therapist_id", therapistId);
+      const serviceIds = getLinkedServiceIds(linksData);
+
+      if (servicesRequestId.current !== requestId) {
+        return;
+      }
+
+      if (linksError || !serviceIds) {
+        setServicesError(
+          "Usluge za izabranog terapeuta trenutno nije moguće učitati.",
+        );
+        return;
+      }
+
+      if (serviceIds.length === 0) {
+        setServices([]);
+        return;
+      }
+
+      const { data: servicesData, error: servicesLoadError } = await supabase
+        .from("services")
+        .select("id, name, duration_minutes")
+        .in("id", serviceIds)
+        .order("id", { ascending: true });
+      const loadedServices = getServices(servicesData);
+
+      if (servicesRequestId.current !== requestId) {
+        return;
+      }
+
+      if (servicesLoadError || !loadedServices) {
+        setServicesError(
+          "Usluge za izabranog terapeuta trenutno nije moguće učitati.",
+        );
+        return;
+      }
+
+      setServices(loadedServices);
+    } catch {
+      if (servicesRequestId.current === requestId) {
+        setServicesError(
+          "Došlo je do greške pri učitavanju usluga terapeuta.",
+        );
+      }
+    } finally {
+      if (servicesRequestId.current === requestId) {
+        setIsServicesLoading(false);
+      }
+    }
+  }
+
+  async function loadAvailability({
+    therapist,
+    service,
+    date,
+  }: {
+    therapist: Therapist;
+    service: Service;
+    date: string;
+  }) {
+    const requestId = availabilityRequestId.current + 1;
+    availabilityRequestId.current = requestId;
+    const dayOfWeek = getCalendarDayOfWeek(date);
+
+    if (dayOfWeek === null || date < getCurrentBelgradeCalendarDate()) {
+      setAvailabilityError("Izaberite ispravan datum koji nije u prošlosti.");
+      setIsAvailabilityLoading(false);
+      return;
+    }
+
+    try {
+      const [workingHoursResult, bookedSlotsResult] = await Promise.all([
+        supabase
+          .from("working_hours")
+          .select("therapist_id, day_of_week, start_time, end_time")
+          .eq("therapist_id", therapist.id)
+          .eq("day_of_week", dayOfWeek)
+          .order("start_time", { ascending: true }),
+        supabase.rpc("get_booked_slots", {
+          p_therapist_id: therapist.id,
+          p_date: date,
+        }),
+      ]);
+      const loadedWorkingHours = getWorkingHours(workingHoursResult.data);
+      const loadedBookedSlots = getBookedSlots(bookedSlotsResult.data);
+
+      if (availabilityRequestId.current !== requestId) {
+        return;
+      }
+
+      if (
+        workingHoursResult.error ||
+        bookedSlotsResult.error ||
+        !loadedWorkingHours ||
+        !loadedBookedSlots
+      ) {
+        setAvailabilityError(
+          "Slobodne termine trenutno nije moguće učitati.",
+        );
+        return;
+      }
+
+      setAvailableTimes(
+        generateAvailableTimes({
+          date,
+          durationMinutes: service.durationMinutes,
+          workingHours: loadedWorkingHours,
+          bookedSlots: loadedBookedSlots,
+        }),
+      );
+    } catch {
+      if (availabilityRequestId.current === requestId) {
+        setAvailabilityError(
+          "Došlo je do greške pri proveri slobodnih termina.",
+        );
+      }
+    } finally {
+      if (availabilityRequestId.current === requestId) {
+        setIsAvailabilityLoading(false);
+      }
+    }
+  }
+
+  function handleTherapistChange(event: ChangeEvent<HTMLSelectElement>) {
+    const therapistId = event.target.value;
+
+    servicesRequestId.current += 1;
+    availabilityRequestId.current += 1;
+    setValues((currentValues) => ({
+      ...currentValues,
+      therapistId,
+      serviceId: "",
+      time: "",
+    }));
+    setServices([]);
+    setAvailableTimes([]);
+    setServicesError(undefined);
+    setAvailabilityError(undefined);
+    setIsServicesLoading(Boolean(therapistId));
+    setIsAvailabilityLoading(false);
+    clearFieldErrors("therapistId", "serviceId", "time");
+
+    const therapist = therapists.find((currentTherapist) =>
+      idsMatch(currentTherapist.id, therapistId),
+    );
+
+    if (therapist) {
+      void loadServicesForTherapist(therapist.id);
+    }
+  }
+
+  function handleServiceChange(event: ChangeEvent<HTMLSelectElement>) {
+    const serviceId = event.target.value;
+
+    availabilityRequestId.current += 1;
+    setValues((currentValues) => ({
+      ...currentValues,
+      serviceId,
+      time: "",
+    }));
+    setAvailableTimes([]);
+    setAvailabilityError(undefined);
+    setIsAvailabilityLoading(false);
+    clearFieldErrors("serviceId", "time");
+
+    const therapist = therapists.find((currentTherapist) =>
+      idsMatch(currentTherapist.id, values.therapistId),
+    );
+    const service = services.find((currentService) =>
+      idsMatch(currentService.id, serviceId),
+    );
+
+    if (therapist && service && values.date) {
+      setIsAvailabilityLoading(true);
+      void loadAvailability({ therapist, service, date: values.date });
+    }
+  }
+
+  function handleDateChange(event: ChangeEvent<HTMLInputElement>) {
+    const date = event.target.value;
+    const dateError = getManualFieldError("date", date, today);
+
+    availabilityRequestId.current += 1;
+    setValues((currentValues) => ({
+      ...currentValues,
+      date,
+      time: "",
+    }));
+    setAvailableTimes([]);
+    setAvailabilityError(undefined);
+    setIsAvailabilityLoading(false);
+    setErrors((currentErrors) => {
+      const nextErrors = { ...currentErrors };
+
+      if (dateError) {
+        nextErrors.date = dateError;
+      } else {
+        delete nextErrors.date;
+      }
+      delete nextErrors.time;
+
+      return nextErrors;
+    });
+
+    const therapist = therapists.find((currentTherapist) =>
+      idsMatch(currentTherapist.id, values.therapistId),
+    );
+    const service = services.find((currentService) =>
+      idsMatch(currentService.id, values.serviceId),
+    );
+
+    if (!dateError && therapist && service) {
+      setIsAvailabilityLoading(true);
+      void loadAvailability({ therapist, service, date });
+    }
+  }
+
+  function handleTextChange(event: ChangeEvent<HTMLInputElement>) {
+    const field = event.target.name as ManualBookingField;
+    const value = event.target.value;
+
+    setValues((currentValues) => ({ ...currentValues, [field]: value }));
+
+    if (errors[field]) {
+      const error = getManualFieldError(field, value, today);
+
+      setErrors((currentErrors) => {
+        const nextErrors = { ...currentErrors };
+
+        if (error) {
+          nextErrors[field] = error;
+        } else {
+          delete nextErrors[field];
+        }
+
+        return nextErrors;
+      });
+    }
+  }
+
+  function handleTextBlur(event: ChangeEvent<HTMLInputElement>) {
+    const field = event.target.name as ManualBookingField;
+    const error = getManualFieldError(field, event.target.value, today);
+
+    setErrors((currentErrors) => {
+      const nextErrors = { ...currentErrors };
+
+      if (error) {
+        nextErrors[field] = error;
+      } else {
+        delete nextErrors[field];
+      }
+
+      return nextErrors;
+    });
+  }
+
+  function selectTime(time: string) {
+    setValues((currentValues) => ({ ...currentValues, time }));
+    clearFieldErrors("time");
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (submissionInProgress.current) {
+      return;
+    }
+
+    const currentToday = getCurrentBelgradeCalendarDate();
+    const nextErrors: Partial<Record<ManualBookingField, string>> = {};
+
+    (Object.keys(values) as ManualBookingField[]).forEach((field) => {
+      const error = getManualFieldError(field, values[field], currentToday);
+
+      if (error) {
+        nextErrors[field] = error;
+      }
+    });
+
+    const therapist = therapists.find((currentTherapist) =>
+      idsMatch(currentTherapist.id, values.therapistId),
+    );
+    const service = services.find((currentService) =>
+      idsMatch(currentService.id, values.serviceId),
+    );
+
+    if (!therapist) {
+      nextErrors.therapistId = "Izaberite ispravnog terapeuta.";
+    }
+
+    if (!service) {
+      nextErrors.serviceId = "Izaberite uslugu izabranog terapeuta.";
+    }
+
+    if (!availableTimes.includes(values.time)) {
+      nextErrors.time = "Izaberite trenutno dostupan termin.";
+    }
+
+    const startMinutes = parseTime(values.time);
+    const startAt =
+      startMinutes === null
+        ? null
+        : toBelgradeInstant(values.date, startMinutes);
+
+    if (!startAt || new Date(startAt).getTime() <= Date.now()) {
+      nextErrors.time = "Izabrani termin više nije važeći.";
+    }
+
+    setErrors(nextErrors);
+
+    if (
+      Object.keys(nextErrors).length > 0 ||
+      !therapist ||
+      !service ||
+      !startAt
+    ) {
+      return;
+    }
+
+    submissionInProgress.current = true;
+    setIsSubmitting(true);
+    setSubmitError(undefined);
+
+    try {
+      const { data, error } = await supabase
+        .rpc("create_admin_appointment", {
+          p_therapist_id: therapist.id,
+          p_service_id: service.id,
+          p_start_at: startAt,
+          p_parent_name: values.parentName.trim(),
+          p_child_name: values.childName.trim(),
+          p_email: values.email.trim(),
+          p_phone: values.phone.trim(),
+        })
+        .single();
+      const createdAppointment = getCreatedAppointmentResult(data);
+
+      if (error) {
+        const errorMessage = error.message.toLocaleLowerCase("sr-Latn-RS");
+        const isConflict =
+          errorMessage.includes("rezervisan") ||
+          errorMessage.includes("conflict") ||
+          errorMessage.includes("overlap");
+
+        setSubmitError(
+          isConflict
+            ? "Termin je u međuvremenu rezervisan. Izaberite drugi termin."
+            : "Termin trenutno nije moguće zakazati. Pokušajte ponovo.",
+        );
+
+        if (isConflict) {
+          setValues((currentValues) => ({ ...currentValues, time: "" }));
+          setAvailableTimes((currentTimes) =>
+            currentTimes.filter((time) => time !== values.time),
+          );
+        }
+        return;
+      }
+
+      if (!createdAppointment) {
+        setSubmitError(
+          "Termin je možda kreiran, ali potvrda nije dostupna. Osvežite raspored pre novog pokušaja.",
+        );
+        return;
+      }
+
+      setIsSendingNotifications(true);
+      const formattedDate = formatSelectedDate(values.date);
+      const [parentEmailSent, therapistNotificationSent] = await Promise.all([
+        sendManualBookingConfirmationEmail({
+          email: values.email.trim(),
+          serviceName: service.name,
+          therapistName: therapist.name,
+          date:
+            formattedDate.charAt(0).toLocaleUpperCase("sr-Latn-RS") +
+            formattedDate.slice(1),
+          time: values.time,
+          cancelToken: createdAppointment.cancelToken,
+        }),
+        sendManualTherapistNotification(createdAppointment),
+      ]);
+
+      onCreated(parentEmailSent && therapistNotificationSent);
+    } catch {
+      setSubmitError(
+        "Došlo je do neočekivane greške. Pokušajte ponovo kasnije.",
+      );
+    } finally {
+      submissionInProgress.current = false;
+      setIsSubmitting(false);
+      setIsSendingNotifications(false);
+    }
+  }
+
+  function requestClose() {
+    if (!submissionInProgress.current) {
+      onClose();
+    }
+  }
+
+  const selectedService = services.find((service) =>
+    idsMatch(service.id, values.serviceId),
+  );
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[#172b27]/45 p-4 backdrop-blur-sm"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          requestClose();
+        }
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="new-appointment-title"
+        className="max-h-[calc(100vh-2rem)] w-full max-w-3xl overflow-y-auto rounded-3xl border border-white/80 bg-[#fffaf3] p-6 shadow-[0_28px_90px_rgba(23,43,39,0.28)] sm:p-8"
+      >
+        <div className="flex items-start justify-between gap-5">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.12em] text-[#397267] uppercase">
+              Admin panel
+            </p>
+            <h2
+              id="new-appointment-title"
+              className="mt-2 text-2xl font-semibold tracking-[-0.025em] text-[#243c38] sm:text-3xl"
+            >
+              Novi termin
+            </h2>
+            <p className="mt-2 text-sm leading-6 text-[#6b807c]">
+              Unesite podatke i izaberite jedan od trenutno slobodnih termina.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={requestClose}
+            disabled={isSubmitting}
+            aria-label="Zatvori formu za novi termin"
+            className="grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-full border border-[#397267]/15 bg-white text-xl leading-none text-[#397267] transition hover:border-[#397267]/30 hover:bg-[#edf5f0] focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-[#397267] disabled:cursor-wait disabled:opacity-50"
+          >
+            ×
+          </button>
+        </div>
+
+        <form noValidate onSubmit={handleSubmit} className="mt-8">
+          <div className="grid gap-5 sm:grid-cols-2">
+            <div>
+              <label
+                htmlFor="manual-therapist"
+                className="block text-sm font-semibold text-[#243c38]"
+              >
+                Terapeut <span className="text-[#b45745]">*</span>
+              </label>
+              <select
+                id="manual-therapist"
+                value={values.therapistId}
+                onChange={handleTherapistChange}
+                disabled={isSubmitting}
+                aria-invalid={Boolean(errors.therapistId)}
+                className="mt-2 min-h-12 w-full rounded-2xl border border-[#397267]/18 bg-[#fffdf9] px-4 py-3 text-[#243c38] outline-none focus:border-[#397267]/45 focus:ring-3 focus:ring-[#397267]/12 disabled:opacity-60"
+              >
+                <option value="">Izaberite terapeuta</option>
+                {therapists.map((therapist) => (
+                  <option key={String(therapist.id)} value={String(therapist.id)}>
+                    {therapist.name}
+                  </option>
+                ))}
+              </select>
+              {errors.therapistId && (
+                <p role="alert" className="mt-2 text-sm text-[#a34838]">
+                  {errors.therapistId}
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label
+                htmlFor="manual-service"
+                className="block text-sm font-semibold text-[#243c38]"
+              >
+                Usluga <span className="text-[#b45745]">*</span>
+              </label>
+              <select
+                id="manual-service"
+                value={values.serviceId}
+                onChange={handleServiceChange}
+                disabled={
+                  isSubmitting || !values.therapistId || isServicesLoading
+                }
+                aria-invalid={Boolean(errors.serviceId)}
+                className="mt-2 min-h-12 w-full rounded-2xl border border-[#397267]/18 bg-[#fffdf9] px-4 py-3 text-[#243c38] outline-none focus:border-[#397267]/45 focus:ring-3 focus:ring-[#397267]/12 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <option value="">
+                  {isServicesLoading
+                    ? "Učitavanje usluga..."
+                    : "Izaberite uslugu"}
+                </option>
+                {services.map((service) => (
+                  <option key={String(service.id)} value={String(service.id)}>
+                    {service.name} — {service.durationMinutes} minuta
+                  </option>
+                ))}
+              </select>
+              {errors.serviceId && (
+                <p role="alert" className="mt-2 text-sm text-[#a34838]">
+                  {errors.serviceId}
+                </p>
+              )}
+              {servicesError && (
+                <p role="alert" className="mt-2 text-sm text-[#a34838]">
+                  {servicesError}
+                </p>
+              )}
+              {!isServicesLoading &&
+                values.therapistId &&
+                !servicesError &&
+                services.length === 0 && (
+                  <p className="mt-2 text-sm text-[#6b807c]">
+                    Terapeut nema povezane usluge.
+                  </p>
+                )}
+            </div>
+
+            <div>
+              <label
+                htmlFor="manual-date"
+                className="block text-sm font-semibold text-[#243c38]"
+              >
+                Datum <span className="text-[#b45745]">*</span>
+              </label>
+              <input
+                id="manual-date"
+                type="date"
+                min={today}
+                value={values.date}
+                onChange={handleDateChange}
+                disabled={isSubmitting}
+                aria-invalid={Boolean(errors.date)}
+                className="mt-2 min-h-12 w-full rounded-2xl border border-[#397267]/18 bg-[#fffdf9] px-4 py-3 text-[#243c38] outline-none focus:border-[#397267]/45 focus:ring-3 focus:ring-[#397267]/12 disabled:opacity-60"
+              />
+              {errors.date && (
+                <p role="alert" className="mt-2 text-sm text-[#a34838]">
+                  {errors.date}
+                </p>
+              )}
+            </div>
+
+            <div>
+              <p className="block text-sm font-semibold text-[#243c38]">
+                Vreme <span className="text-[#b45745]">*</span>
+              </p>
+              <div className="mt-2 min-h-12 rounded-2xl border border-[#397267]/12 bg-white/60 p-3">
+                {isAvailabilityLoading ? (
+                  <p className="py-2 text-sm text-[#6b807c]">
+                    Provera slobodnih termina...
+                  </p>
+                ) : availabilityError ? (
+                  <p role="alert" className="py-2 text-sm text-[#a34838]">
+                    {availabilityError}
+                  </p>
+                ) : availableTimes.length > 0 ? (
+                  <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
+                    {availableTimes.map((time) => {
+                      const isSelected = values.time === time;
+
+                      return (
+                        <button
+                          key={time}
+                          type="button"
+                          onClick={() => selectTime(time)}
+                          disabled={isSubmitting}
+                          className={`min-h-10 rounded-xl border px-2 py-2 text-sm font-semibold transition ${
+                            isSelected
+                              ? "border-[#397267] bg-[#397267] text-white"
+                              : "border-[#397267]/15 bg-white text-[#397267] hover:border-[#397267]/35"
+                          }`}
+                        >
+                          {time}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : values.therapistId &&
+                  values.serviceId &&
+                  values.date ? (
+                  <p className="py-2 text-sm text-[#6b807c]">
+                    Nema slobodnih termina za izabrani datum.
+                  </p>
+                ) : (
+                  <p className="py-2 text-sm text-[#6b807c]">
+                    Izaberite terapeuta, uslugu i datum.
+                  </p>
+                )}
+              </div>
+              {selectedService && (
+                <p className="mt-2 text-xs text-[#6b807c]">
+                  Trajanje: {selectedService.durationMinutes} minuta, uz 15
+                  minuta pauze.
+                </p>
+              )}
+              {errors.time && (
+                <p role="alert" className="mt-2 text-sm text-[#a34838]">
+                  {errors.time}
+                </p>
+              )}
+            </div>
+
+            {(
+              [
+                {
+                  name: "parentName",
+                  label: "Ime roditelja",
+                  type: "text",
+                  autoComplete: "name",
+                },
+                {
+                  name: "childName",
+                  label: "Ime deteta",
+                  type: "text",
+                  autoComplete: "off",
+                },
+                {
+                  name: "email",
+                  label: "Email",
+                  type: "email",
+                  autoComplete: "email",
+                },
+                {
+                  name: "phone",
+                  label: "Telefon",
+                  type: "tel",
+                  autoComplete: "tel",
+                },
+              ] as const
+            ).map((field) => (
+              <div key={field.name}>
+                <label
+                  htmlFor={`manual-${field.name}`}
+                  className="block text-sm font-semibold text-[#243c38]"
+                >
+                  {field.label} <span className="text-[#b45745]">*</span>
+                </label>
+                <input
+                  id={`manual-${field.name}`}
+                  name={field.name}
+                  type={field.type}
+                  autoComplete={field.autoComplete}
+                  value={values[field.name]}
+                  onChange={handleTextChange}
+                  onBlur={handleTextBlur}
+                  disabled={isSubmitting}
+                  aria-invalid={Boolean(errors[field.name])}
+                  className="mt-2 min-h-12 w-full rounded-2xl border border-[#397267]/18 bg-[#fffdf9] px-4 py-3 text-[#243c38] outline-none focus:border-[#397267]/45 focus:ring-3 focus:ring-[#397267]/12 disabled:opacity-60"
+                />
+                {errors[field.name] && (
+                  <p role="alert" className="mt-2 text-sm text-[#a34838]">
+                    {errors[field.name]}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {submitError && (
+            <div
+              role="alert"
+              className="mt-6 rounded-2xl border border-[#b45745]/20 bg-[#fff8f5] px-5 py-4 text-sm font-medium leading-6 text-[#8f4033]"
+            >
+              {submitError}
+            </div>
+          )}
+
+          <div className="mt-8 flex flex-col-reverse gap-3 border-t border-[#397267]/10 pt-6 sm:flex-row sm:justify-end">
+            <button
+              type="button"
+              onClick={requestClose}
+              disabled={isSubmitting}
+              className="min-h-12 rounded-full border border-[#397267]/20 bg-white px-6 py-3 text-sm font-semibold text-[#397267] transition hover:border-[#397267]/35 disabled:cursor-wait disabled:opacity-50"
+            >
+              Zatvori
+            </button>
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              aria-busy={isSubmitting}
+              className="min-h-12 rounded-full bg-[#397267] px-7 py-3 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(57,114,103,0.2)] transition hover:bg-[#2f6158] disabled:cursor-wait disabled:opacity-60"
+            >
+              {isSendingNotifications
+                ? "Slanje obaveštenja..."
+                : isSubmitting
+                  ? "Zakazivanje..."
+                  : "Zakaži termin"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 async function signOutWithoutThrowing() {
   try {
     await supabase.auth.signOut();
@@ -789,6 +1949,11 @@ export default function AdminPage() {
     useState<AppointmentDetails>();
   const [isDetailsLoading, setIsDetailsLoading] = useState(false);
   const [detailsError, setDetailsError] = useState<string>();
+  const [isNewAppointmentOpen, setIsNewAppointmentOpen] = useState(false);
+  const [bookingSuccess, setBookingSuccess] = useState<{
+    message: string;
+    hasEmailWarning: boolean;
+  }>();
 
   useEffect(() => {
     let isActive = true;
@@ -994,6 +2159,17 @@ export default function AdminPage() {
     setIsDetailsLoading(false);
   }
 
+  function handleManualAppointmentCreated(notificationsSucceeded: boolean) {
+    setIsNewAppointmentOpen(false);
+    setBookingSuccess({
+      message: notificationsSucceeded
+        ? "Termin je uspešno zakazan. Email obaveštenja su poslata."
+        : "Termin je uspešno zakazan, ali jedno ili više email obaveštenja trenutno nije bilo moguće poslati.",
+      hasEmailWarning: !notificationsSucceeded,
+    });
+    showDay(selectedDate);
+  }
+
   function showDay(nextDate: string) {
     setScheduleError(undefined);
     setIsScheduleLoading(true);
@@ -1103,6 +2279,17 @@ export default function AdminPage() {
                   <h1 className="mt-3 text-4xl leading-tight font-semibold tracking-[-0.035em] text-[#243c38] sm:text-5xl">
                     Raspored centra
                   </h1>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBookingSuccess(undefined);
+                      setIsNewAppointmentOpen(true);
+                    }}
+                    className="mt-5 inline-flex min-h-11 items-center justify-center gap-2 rounded-full bg-[#397267] px-5 py-2.5 text-sm font-semibold text-white shadow-[0_10px_26px_rgba(57,114,103,0.2)] transition hover:bg-[#2f6158] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267]"
+                  >
+                    <span aria-hidden="true">+</span>
+                    Novi termin
+                  </button>
                 </div>
 
                 <div className="flex flex-col gap-3 lg:items-end">
@@ -1144,6 +2331,19 @@ export default function AdminPage() {
                   className="mt-6 rounded-2xl border border-[#b45745]/20 bg-[#fff8f5] px-5 py-4 text-sm font-medium leading-6 text-[#8f4033]"
                 >
                   {signOutError}
+                </div>
+              )}
+
+              {bookingSuccess && (
+                <div
+                  role="status"
+                  className={`mt-6 rounded-2xl border px-5 py-4 text-sm font-medium leading-6 ${
+                    bookingSuccess.hasEmailWarning
+                      ? "border-[#d89a58]/25 bg-[#fff7e9] text-[#815a2d]"
+                      : "border-[#397267]/18 bg-[#edf7f1] text-[#2f6158]"
+                  }`}
+                >
+                  {bookingSuccess.message}
                 </div>
               )}
 
@@ -1208,6 +2408,14 @@ export default function AdminPage() {
           ) : null}
         </section>
       </main>
+
+      {isNewAppointmentOpen && (
+        <NewAppointmentModal
+          therapists={therapists ?? []}
+          onClose={() => setIsNewAppointmentOpen(false)}
+          onCreated={handleManualAppointmentCreated}
+        />
+      )}
 
       {selectedAppointmentId !== null && (
         <div
