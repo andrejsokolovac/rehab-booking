@@ -175,6 +175,26 @@ async function sendBookingConfirmationEmail({
   }
 }
 
+async function sendTherapistBookingNotification({
+  appointmentId,
+  cancelToken,
+}: CreatedAppointmentResult) {
+  try {
+    const response = await fetch(
+      "/api/send-therapist-booking-notification",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appointmentId, cancelToken }),
+      },
+    );
+
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 export default function DetailsForm({ booking }: DetailsFormProps) {
   const router = useRouter();
   const submissionInProgress = useRef(false);
@@ -267,14 +287,17 @@ export default function DetailsForm({ booking }: DetailsFormProps) {
 
         if (!error && createdAppointment) {
           setIsSendingEmail(true);
-          const emailWasSent = await sendBookingConfirmationEmail({
-            email: values.email.trim(),
-            serviceName: booking.serviceName,
-            therapistName: therapist.name,
-            date: booking.formattedDate,
-            time: booking.time,
-            cancelToken: createdAppointment.cancelToken,
-          });
+          const [emailWasSent] = await Promise.all([
+            sendBookingConfirmationEmail({
+              email: values.email.trim(),
+              serviceName: booking.serviceName,
+              therapistName: therapist.name,
+              date: booking.formattedDate,
+              time: booking.time,
+              cancelToken: createdAppointment.cancelToken,
+            }),
+            sendTherapistBookingNotification(createdAppointment),
+          ]);
           const confirmationParams = new URLSearchParams({
             service: booking.serviceSlug,
             therapist: therapist.slug,

@@ -34,6 +34,23 @@ function cancellationSucceeded(data: unknown) {
   return Array.isArray(data) && data[0] === true;
 }
 
+async function sendTherapistCancellationNotification(cancelToken: string) {
+  try {
+    const response = await fetch(
+      "/api/send-therapist-cancellation-notification",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cancelToken }),
+      },
+    );
+
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 export default function CancellationPanel({
   token,
   appointment,
@@ -69,6 +86,7 @@ export default function CancellationPanel({
       }
 
       setStatus("cancelled");
+      await sendTherapistCancellationNotification(token);
     } catch {
       setRequestError(
         "Termin trenutno nije moguće otkazati. Pokušajte ponovo kasnije.",
