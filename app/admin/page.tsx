@@ -764,7 +764,7 @@ function generateAvailableTimes({
     .map(formatTime);
 }
 
-function getCreatedAppointmentResult(
+function getAppointmentRpcResult(
   data: unknown,
 ): CreatedAppointmentResult | null {
   const value = Array.isArray(data) ? data[0] : data;
@@ -902,6 +902,65 @@ async function sendManualTherapistNotification(
     );
 
     return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function sendParentCancellationNotification(
+  appointment: CreatedAppointmentResult,
+) {
+  try {
+    const response = await fetch(
+      "/api/send-parent-cancellation-notification",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          appointmentId: appointment.appointmentId,
+          cancelToken: appointment.cancelToken,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const result: unknown = await response.json();
+
+    return Boolean(
+      result &&
+        typeof result === "object" &&
+        (result as Record<string, unknown>).success === true,
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function sendTherapistCancellationNotification(cancelToken: string) {
+  try {
+    const response = await fetch(
+      "/api/send-therapist-cancellation-notification",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cancelToken }),
+      },
+    );
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const result: unknown = await response.json();
+
+    return Boolean(
+      result &&
+        typeof result === "object" &&
+        (result as Record<string, unknown>).success === true,
+    );
   } catch {
     return false;
   }
@@ -1552,7 +1611,7 @@ function NewAppointmentModal({
           p_phone: values.phone.trim(),
         })
         .single();
-      const createdAppointment = getCreatedAppointmentResult(data);
+      const createdAppointment = getAppointmentRpcResult(data);
 
       if (error) {
         const errorMessage = error.message.toLocaleLowerCase("sr-Latn-RS");
@@ -1930,6 +1989,7 @@ export default function AdminPage() {
   const router = useRouter();
   const signOutInProgress = useRef(false);
   const detailsRequestId = useRef(0);
+  const cancellationInProgress = useRef(false);
   const [selectedDate, setSelectedDate] = useState(
     getCurrentBelgradeCalendarDate,
   );
@@ -1950,6 +2010,10 @@ export default function AdminPage() {
   const [isDetailsLoading, setIsDetailsLoading] = useState(false);
   const [detailsError, setDetailsError] = useState<string>();
   const [isNewAppointmentOpen, setIsNewAppointmentOpen] = useState(false);
+  const [isCancellationConfirmationOpen, setIsCancellationConfirmationOpen] =
+    useState(false);
+  const [isCancellingAppointment, setIsCancellingAppointment] = useState(false);
+  const [cancellationError, setCancellationError] = useState<string>();
   const [bookingSuccess, setBookingSuccess] = useState<{
     message: string;
     hasEmailWarning: boolean;
@@ -2116,6 +2180,8 @@ export default function AdminPage() {
     setAppointmentDetails(undefined);
     setDetailsError(undefined);
     setIsDetailsLoading(true);
+    setIsCancellationConfirmationOpen(false);
+    setCancellationError(undefined);
 
     try {
       const { data, error } = await supabase.rpc(
@@ -2152,11 +2218,100 @@ export default function AdminPage() {
   }
 
   function closeAppointmentDetails() {
+    if (cancellationInProgress.current) {
+      return;
+    }
+
     detailsRequestId.current += 1;
     setSelectedAppointmentId(null);
     setAppointmentDetails(undefined);
     setDetailsError(undefined);
     setIsDetailsLoading(false);
+    setIsCancellationConfirmationOpen(false);
+    setCancellationError(undefined);
+  }
+
+  async function cancelSelectedAppointment() {
+    if (
+      cancellationInProgress.current ||
+      selectedAppointmentId === null ||
+      appointmentDetails?.status !== "confirmed"
+    ) {
+      return;
+    }
+
+    const appointmentId = selectedAppointmentId;
+    cancellationInProgress.current = true;
+    setIsCancellingAppointment(true);
+    setCancellationError(undefined);
+
+    let cancelledAppointment: CreatedAppointmentResult | null = null;
+    let cancellationWasSuccessful = false;
+
+    try {
+      const { data, error } = await supabase
+        .rpc("cancel_admin_appointment", {
+          p_appointment_id: appointmentId,
+        })
+        .single();
+
+      if (error) {
+        setCancellationError(
+          "Termin trenutno nije moguće otkazati. Pokušajte ponovo.",
+        );
+        return;
+      }
+
+      cancelledAppointment = getAppointmentRpcResult(data);
+
+      if (
+        !cancelledAppointment ||
+        !idsMatch(cancelledAppointment.appointmentId, appointmentId)
+      ) {
+        setCancellationError(
+          "Potvrdu o otkazivanju trenutno nije moguće učitati. Osvežite raspored pre novog pokušaja.",
+        );
+        return;
+      }
+
+      cancellationWasSuccessful = true;
+    } catch {
+      setCancellationError(
+        "Došlo je do neočekivane greške pri otkazivanju termina.",
+      );
+      return;
+    } finally {
+      if (!cancellationWasSuccessful) {
+        cancellationInProgress.current = false;
+        setIsCancellingAppointment(false);
+      }
+    }
+
+    cancellationInProgress.current = false;
+    setIsCancellingAppointment(false);
+    setIsCancellationConfirmationOpen(false);
+    closeAppointmentDetails();
+    setBookingSuccess({
+      message: "Termin je uspešno otkazan.",
+      hasEmailWarning: false,
+    });
+    showDay(selectedDate);
+
+    const [parentNotificationSent, therapistNotificationSent] =
+      await Promise.all([
+        sendParentCancellationNotification(cancelledAppointment),
+        sendTherapistCancellationNotification(
+          cancelledAppointment.cancelToken,
+        ),
+      ]);
+
+    if (!parentNotificationSent || !therapistNotificationSent) {
+      setBookingSuccess({
+        message:
+          "Termin je otkazan, ali jedno ili više obaveštenja nije uspešno poslato.",
+        hasEmailWarning: true,
+      });
+    }
   }
 
   function handleManualAppointmentCreated(notificationsSucceeded: boolean) {
@@ -2569,7 +2724,19 @@ export default function AdminPage() {
                   Termin je kreiran: {formatCreatedAt(appointmentDetails.createdAt)}
                 </div>
 
-                <div className="mt-7 flex justify-end">
+                <div className="mt-7 flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-end">
+                  {appointmentDetails.status === "confirmed" && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCancellationError(undefined);
+                        setIsCancellationConfirmationOpen(true);
+                      }}
+                      className="min-h-11 rounded-full border border-[#b45745]/25 bg-[#fff8f5] px-6 py-2 text-sm font-semibold text-[#a34838] transition hover:border-[#b45745]/45 hover:bg-[#f9e8e2] focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#b45745] sm:mr-auto"
+                    >
+                      Otkaži termin
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={closeAppointmentDetails}
@@ -2583,6 +2750,82 @@ export default function AdminPage() {
           </div>
         </div>
       )}
+
+      {isCancellationConfirmationOpen &&
+        selectedAppointmentId !== null &&
+        appointmentDetails?.status === "confirmed" && (
+          <div
+            className="fixed inset-0 z-60 flex items-center justify-center bg-[#172b27]/55 p-4 backdrop-blur-sm"
+            onMouseDown={(event) => {
+              if (
+                event.target === event.currentTarget &&
+                !isCancellingAppointment
+              ) {
+                setIsCancellationConfirmationOpen(false);
+                setCancellationError(undefined);
+              }
+            }}
+          >
+            <div
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="cancel-appointment-title"
+              aria-describedby="cancel-appointment-description"
+              className="w-full max-w-lg rounded-3xl border border-white/80 bg-[#fffaf3] p-6 shadow-[0_28px_90px_rgba(23,43,39,0.32)] sm:p-8"
+            >
+              <div className="grid h-12 w-12 place-items-center rounded-2xl bg-[#f7dfd7] text-2xl text-[#a34838]">
+                <span aria-hidden="true">!</span>
+              </div>
+              <h2
+                id="cancel-appointment-title"
+                className="mt-5 text-2xl font-semibold tracking-[-0.025em] text-[#243c38]"
+              >
+                Da li ste sigurni da želite da otkažete ovaj termin?
+              </h2>
+              <p
+                id="cancel-appointment-description"
+                className="mt-3 text-sm leading-6 text-[#6b807c]"
+              >
+                Termin će biti otkazan, a vreme će ponovo postati dostupno za
+                zakazivanje.
+              </p>
+
+              {cancellationError && (
+                <div
+                  role="alert"
+                  className="mt-5 rounded-2xl border border-[#b45745]/20 bg-[#fff8f5] px-4 py-3 text-sm font-medium leading-6 text-[#8f4033]"
+                >
+                  {cancellationError}
+                </div>
+              )}
+
+              <div className="mt-7 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCancellationConfirmationOpen(false);
+                    setCancellationError(undefined);
+                  }}
+                  disabled={isCancellingAppointment}
+                  className="min-h-11 rounded-full border border-[#397267]/20 bg-white px-6 py-2 text-sm font-semibold text-[#397267] transition hover:border-[#397267]/35 disabled:cursor-wait disabled:opacity-50"
+                >
+                  Odustani
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void cancelSelectedAppointment()}
+                  disabled={isCancellingAppointment}
+                  aria-busy={isCancellingAppointment}
+                  className="min-h-11 rounded-full bg-[#b45745] px-6 py-2 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(180,87,69,0.22)] transition hover:bg-[#984737] disabled:cursor-wait disabled:opacity-60"
+                >
+                  {isCancellingAppointment
+                    ? "Otkazivanje..."
+                    : "Potvrdi otkazivanje"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
     </div>
   );
 }
