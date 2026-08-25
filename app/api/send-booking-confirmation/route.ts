@@ -2,7 +2,9 @@ import { Resend } from "resend";
 
 export const runtime = "nodejs";
 
-const APP_BASE_URL = "http://localhost:3000";
+const appBaseUrl = (
+  process.env.APP_BASE_URL || "http://localhost:3000"
+).replace(/\/+$/, "");
 const CENTER_ADDRESS = "Bulevar Vojvode Stepe 133, Novi Sad";
 const GOOGLE_MAPS_URL = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
   CENTER_ADDRESS,
@@ -159,10 +161,9 @@ export async function POST(request: Request) {
     );
   }
 
-  const cancellationUrl = new URL(
-    `/cancel/${encodeURIComponent(payload.cancelToken)}`,
-    APP_BASE_URL,
-  ).toString();
+  const cancellationUrl = `${appBaseUrl}/cancel/${encodeURIComponent(
+    payload.cancelToken,
+  )}`;
   const resend = new Resend(apiKey);
 
   try {

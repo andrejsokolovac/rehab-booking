@@ -3,7 +3,9 @@ import { supabaseAdmin } from "@/lib/supabase-admin";
 
 export const runtime = "nodejs";
 
-const APP_BASE_URL = "http://localhost:3000";
+const appBaseUrl = (
+  process.env.APP_BASE_URL || "http://localhost:3000"
+).replace(/\/+$/, "");
 const BELGRADE_TIME_ZONE = "Europe/Belgrade";
 const CENTER_ADDRESS = "Bulevar vojvode Stepe 133, Novi Sad";
 const GOOGLE_MAPS_URL = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
@@ -358,10 +360,9 @@ export async function POST(request: Request) {
       continue;
     }
 
-    const cancellationUrl = new URL(
-      `/cancel/${encodeURIComponent(appointment.cancelToken)}`,
-      APP_BASE_URL,
-    ).toString();
+    const cancellationUrl = `${appBaseUrl}/cancel/${encodeURIComponent(
+      appointment.cancelToken,
+    )}`;
     let emailWasSent = false;
 
     try {
