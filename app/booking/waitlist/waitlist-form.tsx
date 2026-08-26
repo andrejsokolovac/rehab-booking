@@ -30,6 +30,11 @@ type FormValues = {
 type FieldName = keyof FormValues;
 type ErrorName = FieldName | "preferredDays";
 
+type WaitlistCreationResult = {
+  waitlistId: number | string;
+  waitlistToken: string;
+};
+
 const WEEKDAYS = [
   { value: 1, label: "Ponedeljak" },
   { value: 2, label: "Utorak" },
@@ -136,11 +141,11 @@ function getPersonalFieldError(
   return undefined;
 }
 
-function waitlistResultIsValid(data: unknown) {
+function getWaitlistResult(data: unknown): WaitlistCreationResult | null {
   const value = Array.isArray(data) ? data[0] : data;
 
   if (!value || typeof value !== "object") {
-    return false;
+    return null;
   }
 
   const row = value as Record<string, unknown>;
@@ -152,11 +157,29 @@ function waitlistResultIsValid(data: unknown) {
       waitlistId > 0) ||
     (typeof waitlistId === "string" && /^[1-9]\d*$/.test(waitlistId));
 
-  return (
-    idIsValid &&
-    typeof waitlistToken === "string" &&
-    UUID_PATTERN.test(waitlistToken)
-  );
+  if (
+    !idIsValid ||
+    typeof waitlistToken !== "string" ||
+    !UUID_PATTERN.test(waitlistToken)
+  ) {
+    return null;
+  }
+
+  return { waitlistId, waitlistToken } as WaitlistCreationResult;
+}
+
+async function sendWaitlistRegistrationConfirmation(
+  result: WaitlistCreationResult,
+) {
+  try {
+    await fetch("/api/send-waitlist-registration-confirmation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(result),
+    });
+  } catch {
+    // Registration already succeeded, so email delivery is non-blocking.
+  }
 }
 
 export default function WaitlistForm({
@@ -316,13 +339,16 @@ export default function WaitlistForm({
         })
         .single();
 
-      if (error || !waitlistResultIsValid(data)) {
+      const waitlistResult = getWaitlistResult(data);
+
+      if (error || !waitlistResult) {
         setSubmitError(
           "Prijavu trenutno nije moguće sačuvati. Pokušajte ponovo kasnije.",
         );
         return;
       }
 
+      await sendWaitlistRegistrationConfirmation(waitlistResult);
       setIsSuccess(true);
     } catch {
       setSubmitError(
