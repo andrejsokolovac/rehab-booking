@@ -215,19 +215,34 @@ async function therapistIsAvailable(
     return null;
   }
 
-  const [unavailabilityResult, waitlistHoldsResult] = await Promise.all([
-    supabase.rpc("get_therapist_unavailability", {
-      p_therapist_id: therapistId,
-      p_date: date,
-    }),
-    supabase.rpc("get_active_waitlist_holds", {
-      p_therapist_id: therapistId,
-      p_date: date,
-    }),
-  ]);
+  const [activeTherapistResult, unavailabilityResult, waitlistHoldsResult] =
+    await Promise.all([
+      supabase
+        .from("therapists")
+        .select("id")
+        .eq("id", therapistId)
+        .eq("is_active", true)
+        .maybeSingle(),
+      supabase.rpc("get_therapist_unavailability", {
+        p_therapist_id: therapistId,
+        p_date: date,
+      }),
+      supabase.rpc("get_active_waitlist_holds", {
+        p_therapist_id: therapistId,
+        p_date: date,
+      }),
+    ]);
 
-  if (unavailabilityResult.error || waitlistHoldsResult.error) {
+  if (
+    activeTherapistResult.error ||
+    unavailabilityResult.error ||
+    waitlistHoldsResult.error
+  ) {
     return null;
+  }
+
+  if (!activeTherapistResult.data) {
+    return false;
   }
 
   return (

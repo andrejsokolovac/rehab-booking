@@ -83,6 +83,7 @@ async function loadTherapistsForService(
     .from("therapists")
     .select("id, name, slug, specialty:speciality")
     .in("id", therapistIds)
+    .eq("is_active", true)
     .order("id", { ascending: true });
 
   return {

@@ -25,6 +25,7 @@ type DatabaseId = number | string;
 type Therapist = {
   id: DatabaseId;
   name: string;
+  isActive: boolean;
 };
 
 type WorkingHour = {
@@ -384,12 +385,13 @@ function getTherapists(data: unknown): Therapist[] | null {
     const row = value as Record<string, unknown>;
     const id = getDatabaseId(row.id);
     const name = getNonEmptyString(row.name);
+    const isActive = row.is_active;
 
-    if (id === null || !name) {
+    if (id === null || !name || typeof isActive !== "boolean") {
       return null;
     }
 
-    therapists.push({ id, name });
+    therapists.push({ id, name, isActive });
   }
 
   return therapists;
@@ -1834,6 +1836,29 @@ function NewAppointmentModal({
     setSubmitError(undefined);
 
     try {
+      const { data: activeTherapist, error: therapistStatusError } =
+        await supabase
+          .from("therapists")
+          .select("id")
+          .eq("id", therapist.id)
+          .eq("is_active", true)
+          .maybeSingle();
+
+      if (therapistStatusError || !activeTherapist) {
+        setSubmitError(
+          "Izabrani terapeut trenutno nije dostupan za novo zakazivanje.",
+        );
+        setValues((currentValues) => ({
+          ...currentValues,
+          therapistId: "",
+          serviceId: "",
+          time: "",
+        }));
+        setServices([]);
+        setAvailableTimes([]);
+        return;
+      }
+
       const { data, error } = await supabase
         .rpc("create_admin_appointment", {
           p_therapist_id: therapist.id,
@@ -2305,7 +2330,7 @@ export default function AdminPage() {
 
         const { data, error } = await supabase
           .from("therapists")
-          .select("id, name")
+          .select("id, name, is_active")
           .order("id", { ascending: true });
         const loadedTherapists = getTherapists(data);
 
@@ -2760,15 +2785,23 @@ export default function AdminPage() {
           </Link>
 
           {isAuthorized && (
-            <button
-              type="button"
-              onClick={handleSignOut}
-              disabled={isSigningOut}
-              aria-busy={isSigningOut}
-              className="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-full border border-[#397267]/20 bg-white/75 px-5 py-2.5 text-sm font-semibold text-[#397267] transition hover:border-[#397267]/35 hover:bg-white focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267] disabled:cursor-wait disabled:opacity-65"
-            >
-              {isSigningOut ? "Odjavljivanje..." : "Odjavi se"}
-            </button>
+            <div className="flex items-center gap-2 sm:gap-3">
+              <Link
+                href="/admin/settings"
+                className="inline-flex min-h-11 items-center justify-center rounded-full border border-[#397267]/20 bg-white/75 px-4 py-2.5 text-sm font-semibold text-[#397267] transition hover:border-[#397267]/35 hover:bg-white focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267] sm:px-5"
+              >
+                Podešavanja
+              </Link>
+              <button
+                type="button"
+                onClick={handleSignOut}
+                disabled={isSigningOut}
+                aria-busy={isSigningOut}
+                className="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-full border border-[#397267]/20 bg-white/75 px-4 py-2.5 text-sm font-semibold text-[#397267] transition hover:border-[#397267]/35 hover:bg-white focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267] disabled:cursor-wait disabled:opacity-65 sm:px-5"
+              >
+                {isSigningOut ? "Odjavljivanje..." : "Odjavi se"}
+              </button>
+            </div>
           )}
         </div>
       </header>
@@ -2968,7 +3001,9 @@ export default function AdminPage() {
 
       {isNewAppointmentOpen && (
         <NewAppointmentModal
-          therapists={therapists ?? []}
+          therapists={(therapists ?? []).filter(
+            (therapist) => therapist.isActive,
+          )}
           onClose={() => setIsNewAppointmentOpen(false)}
           onCreated={handleManualAppointmentCreated}
         />

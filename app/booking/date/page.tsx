@@ -168,10 +168,39 @@ async function loadAvailability(
       };
     }
 
+    const { data: activeTherapists, error: activeTherapistsError } =
+      await supabase
+        .from("therapists")
+        .select("id")
+        .in("id", therapistIds)
+        .eq("is_active", true);
+
+    if (activeTherapistsError) {
+      return {
+        selectedService,
+        selectedTherapist,
+        availableDays: new Set<number>(),
+        hasError: true,
+      };
+    }
+
+    const activeTherapistIds = (activeTherapists ?? []).map(
+      (therapist) => therapist.id,
+    );
+
+    if (activeTherapistIds.length === 0) {
+      return {
+        selectedService,
+        selectedTherapist,
+        availableDays: new Set<number>(),
+        hasError: false,
+      };
+    }
+
     const { data: workingHours, error: workingHoursError } = await supabase
       .from("working_hours")
       .select("day_of_week")
-      .in("therapist_id", therapistIds);
+      .in("therapist_id", activeTherapistIds);
 
     return {
       selectedService,
@@ -185,6 +214,7 @@ async function loadAvailability(
     .from("therapists")
     .select("id, name, slug")
     .eq("slug", therapistSlug)
+    .eq("is_active", true)
     .maybeSingle();
 
   if (therapistError) {

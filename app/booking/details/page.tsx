@@ -235,6 +235,7 @@ async function loadBookingSelection(
       .from("therapists")
       .select("id, name, slug")
       .eq("slug", therapistSlug)
+      .eq("is_active", true)
       .maybeSingle();
 
     if (therapistError) {
@@ -339,6 +340,34 @@ async function loadBookingSelection(
     };
   }
 
+  const { data: activeTherapists, error: activeTherapistsError } =
+    await supabase
+      .from("therapists")
+      .select("id")
+      .in("id", therapistIds)
+      .eq("is_active", true);
+
+  if (activeTherapistsError) {
+    return {
+      ...emptyResult,
+      selectedService,
+      selectedTherapist,
+      hasError: true,
+    };
+  }
+
+  const activeTherapistIds = (activeTherapists ?? []).map(
+    (therapist) => therapist.id,
+  );
+
+  if (activeTherapistIds.length === 0) {
+    return {
+      ...emptyResult,
+      selectedService,
+      selectedTherapist,
+    };
+  }
+
   const [
     workingHoursResult,
     bookedSlotsResults,
@@ -348,10 +377,10 @@ async function loadBookingSelection(
       supabase
         .from("working_hours")
         .select("therapist_id, start_time, end_time")
-        .in("therapist_id", therapistIds)
+        .in("therapist_id", activeTherapistIds)
         .eq("day_of_week", selectedDate.dayOfWeek),
       Promise.all(
-        therapistIds.map((therapistId) =>
+        activeTherapistIds.map((therapistId) =>
           supabase.rpc("get_booked_slots", {
             p_therapist_id: therapistId,
             p_date: dateValue,
@@ -359,7 +388,7 @@ async function loadBookingSelection(
         ),
       ),
       Promise.all(
-        therapistIds.map((therapistId) =>
+        activeTherapistIds.map((therapistId) =>
           supabase.rpc("get_therapist_unavailability", {
             p_therapist_id: therapistId,
             p_date: dateValue,
@@ -367,7 +396,7 @@ async function loadBookingSelection(
         ),
       ),
       Promise.all(
-        therapistIds.map((therapistId) =>
+        activeTherapistIds.map((therapistId) =>
           supabase.rpc("get_active_waitlist_holds", {
             p_therapist_id: therapistId,
             p_date: dateValue,
@@ -393,16 +422,19 @@ async function loadBookingSelection(
 
   const workingHours =
     (workingHoursResult.data as TherapistWorkingHour[] | null) ?? [];
-  const therapistSchedules = therapistIds.map((therapistId, index) => ({
-    therapistId,
-    workingHours: workingHours.filter(
-      (workingHour) => workingHour.therapist_id === therapistId,
-    ),
-    bookedSlots: (bookedSlotsResults[index].data ?? []) as BookedSlot[],
-    unavailabilityBlocks: (unavailabilityResults[index].data ??
-      []) as UnavailabilityBlock[],
-    waitlistHolds: (waitlistHoldsResults[index].data ?? []) as WaitlistHold[],
-  }));
+  const therapistSchedules = activeTherapistIds.map(
+    (therapistId, index) => ({
+      therapistId,
+      workingHours: workingHours.filter(
+        (workingHour) => workingHour.therapist_id === therapistId,
+      ),
+      bookedSlots: (bookedSlotsResults[index].data ?? []) as BookedSlot[],
+      unavailabilityBlocks: (unavailabilityResults[index].data ??
+        []) as UnavailabilityBlock[],
+      waitlistHolds: (waitlistHoldsResults[index].data ??
+        []) as WaitlistHold[],
+    }),
+  );
   const eligibleTherapistIds = therapistSchedules
     .filter((schedule) =>
       isTimeAvailableForSchedule(
@@ -425,7 +457,8 @@ async function loadBookingSelection(
   const { data: therapists, error: therapistsError } = await supabase
     .from("therapists")
     .select("id, name, slug")
-    .in("id", eligibleTherapistIds);
+    .in("id", eligibleTherapistIds)
+    .eq("is_active", true);
   const therapistCandidates = eligibleTherapistIds.flatMap((therapistId) => {
     const therapist = (therapists ?? []).find(
       (candidate) => candidate.id === therapistId,
