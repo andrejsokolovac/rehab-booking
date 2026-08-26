@@ -15,6 +15,11 @@ type Therapist = {
   isActive: boolean;
 };
 
+type TherapistContactEmail = {
+  therapistId: DatabaseId;
+  email: string;
+};
+
 type Service = {
   id: DatabaseId;
   name: string;
@@ -43,6 +48,7 @@ type WorkingDayFormValue = {
 type NewTherapistValues = {
   name: string;
   speciality: string;
+  email: string;
 };
 
 type NewServiceValues = {
@@ -53,6 +59,7 @@ type NewServiceValues = {
 const INITIAL_NEW_THERAPIST_VALUES: NewTherapistValues = {
   name: "",
   speciality: "",
+  email: "",
 };
 
 const INITIAL_NEW_SERVICE_VALUES: NewServiceValues = {
@@ -69,6 +76,8 @@ const WEEK_DAYS = [
   { dayOfWeek: 6, name: "Subota" },
   { dayOfWeek: 7, name: "Nedelja" },
 ] as const;
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const SETTINGS_AREAS = [
   {
@@ -159,6 +168,47 @@ async function loadTherapists() {
     const therapists = getTherapists(data);
 
     return error || !therapists ? null : therapists;
+  } catch {
+    return null;
+  }
+}
+
+function getTherapistContactEmails(
+  data: unknown,
+): TherapistContactEmail[] | null {
+  if (!Array.isArray(data)) {
+    return null;
+  }
+
+  const contactEmails: TherapistContactEmail[] = [];
+
+  for (const value of data) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+
+    const row = value as Record<string, unknown>;
+    const therapistId = getDatabaseId(row.therapist_id);
+    const email = getNonEmptyString(row.email);
+
+    if (therapistId === null || !email) {
+      return null;
+    }
+
+    contactEmails.push({ therapistId, email });
+  }
+
+  return contactEmails;
+}
+
+async function loadTherapistContactEmails() {
+  try {
+    const { data, error } = await supabase.rpc(
+      "admin_get_therapist_contact_emails",
+    );
+    const contactEmails = getTherapistContactEmails(data);
+
+    return error || !contactEmails ? null : contactEmails;
   } catch {
     return null;
   }
@@ -345,11 +395,15 @@ export default function AdminSettingsPage() {
   const serviceDeletionInProgress = useRef(false);
   const [isAuthorized, setIsAuthorized] = useState(false);
   const [therapists, setTherapists] = useState<Therapist[]>();
+  const [therapistContactEmails, setTherapistContactEmails] =
+    useState<TherapistContactEmail[]>();
   const [services, setServices] = useState<Service[]>();
   const [therapistServiceAssignments, setTherapistServiceAssignments] =
     useState<TherapistServiceAssignment[]>();
   const [workingHours, setWorkingHours] = useState<WorkingHours[]>();
   const [pageError, setPageError] = useState<string>();
+  const [therapistContactEmailsError, setTherapistContactEmailsError] =
+    useState<string>();
   const [servicesError, setServicesError] = useState<string>();
   const [therapistServicesError, setTherapistServicesError] =
     useState<string>();
@@ -387,6 +441,7 @@ export default function AdminSettingsPage() {
   const [therapistCreationError, setTherapistCreationError] =
     useState<string>();
   const [therapistSuccess, setTherapistSuccess] = useState<string>();
+  const [therapistWarning, setTherapistWarning] = useState<string>();
   const [isCreatingTherapist, setIsCreatingTherapist] = useState(false);
   const [selectedTherapist, setSelectedTherapist] =
     useState<Therapist | null>(null);
@@ -461,11 +516,13 @@ export default function AdminSettingsPage() {
 
         const [
           loadedTherapists,
+          loadedTherapistContactEmails,
           loadedServices,
           loadedTherapistServiceAssignments,
           loadedWorkingHours,
         ] = await Promise.all([
           loadTherapists(),
+          loadTherapistContactEmails(),
           loadServices(),
           loadTherapistServiceAssignments(),
           loadWorkingHours(),
@@ -477,6 +534,14 @@ export default function AdminSettingsPage() {
           } else {
             setPageError(
               "Terapeute trenutno nije moguće učitati. Pokušajte ponovo kasnije.",
+            );
+          }
+
+          if (loadedTherapistContactEmails) {
+            setTherapistContactEmails(loadedTherapistContactEmails);
+          } else {
+            setTherapistContactEmailsError(
+              "Email adrese terapeuta trenutno nije moguće učitati. Pokušajte ponovo kasnije.",
             );
           }
 
@@ -522,11 +587,37 @@ export default function AdminSettingsPage() {
     };
   }, [router]);
 
+  async function refreshTherapistsAndContactEmails() {
+    const [refreshedTherapists, refreshedContactEmails] = await Promise.all([
+      loadTherapists(),
+      loadTherapistContactEmails(),
+    ]);
+
+    if (refreshedTherapists) {
+      setTherapists(refreshedTherapists);
+      setPageError(undefined);
+    } else {
+      setPageError(
+        "Podatke terapeuta trenutno nije moguće osvežiti. Pokušajte ponovo kasnije.",
+      );
+    }
+
+    if (refreshedContactEmails) {
+      setTherapistContactEmails(refreshedContactEmails);
+      setTherapistContactEmailsError(undefined);
+    } else {
+      setTherapistContactEmailsError(
+        "Email adrese terapeuta trenutno nije moguće osvežiti. Pokušajte ponovo kasnije.",
+      );
+    }
+  }
+
   function openNewTherapistForm() {
     setNewTherapistValues(INITIAL_NEW_THERAPIST_VALUES);
     setNewTherapistErrors({});
     setTherapistCreationError(undefined);
     setTherapistSuccess(undefined);
+    setTherapistWarning(undefined);
     setIsNewTherapistOpen(true);
   }
 
@@ -552,6 +643,7 @@ export default function AdminSettingsPage() {
 
     const name = newTherapistValues.name.trim();
     const speciality = newTherapistValues.speciality.trim();
+    const email = newTherapistValues.email.trim();
     const nextErrors: Partial<
       Record<keyof NewTherapistValues, string>
     > = {};
@@ -564,6 +656,12 @@ export default function AdminSettingsPage() {
       nextErrors.speciality = "Unesite specijalnost terapeuta.";
     }
 
+    if (!email) {
+      nextErrors.email = "Unesite email za obaveštenja.";
+    } else if (!EMAIL_PATTERN.test(email)) {
+      nextErrors.email = "Unesite ispravnu email adresu.";
+    }
+
     setNewTherapistErrors(nextErrors);
     setTherapistCreationError(undefined);
 
@@ -573,9 +671,10 @@ export default function AdminSettingsPage() {
 
     therapistCreationInProgress.current = true;
     setIsCreatingTherapist(true);
+    let therapistCreated = false;
 
     try {
-      const { error } = await supabase.rpc("admin_create_therapist", {
+      const { data, error } = await supabase.rpc("admin_create_therapist", {
         p_name: name,
         p_speciality: speciality,
       });
@@ -587,25 +686,54 @@ export default function AdminSettingsPage() {
         return;
       }
 
-      const refreshedTherapists = await loadTherapists();
+      therapistCreated = true;
+      const newTherapistId = getDatabaseId(data);
+      let emailSaved = false;
+
+      if (newTherapistId !== null) {
+        const { data: emailResult, error: emailError } = await supabase.rpc(
+          "admin_set_therapist_email",
+          {
+            p_therapist_id: newTherapistId,
+            p_email: email,
+          },
+        );
+
+        emailSaved = !emailError && emailResult === "updated";
+      }
+
+      await refreshTherapistsAndContactEmails();
 
       setIsNewTherapistOpen(false);
       setNewTherapistValues(INITIAL_NEW_THERAPIST_VALUES);
       setNewTherapistErrors({});
-      setTherapistSuccess("Novi terapeut je uspešno dodat.");
+      setTherapistCreationError(undefined);
 
-      if (refreshedTherapists) {
-        setTherapists(refreshedTherapists);
-        setPageError(undefined);
+      if (emailSaved) {
+        setTherapistSuccess("Novi terapeut je uspešno dodat.");
+        setTherapistWarning(undefined);
       } else {
-        setPageError(
-          "Terapeut je dodat, ali osvežavanje liste trenutno nije uspelo.",
+        setTherapistSuccess(undefined);
+        setTherapistWarning(
+          "Terapeut je dodat, ali email za obaveštenja nije sačuvan. Možete ga podesiti kroz Izmeni.",
         );
       }
     } catch {
-      setTherapistCreationError(
-        "Došlo je do neočekivane greške. Pokušajte ponovo.",
-      );
+      if (therapistCreated) {
+        await refreshTherapistsAndContactEmails();
+        setIsNewTherapistOpen(false);
+        setNewTherapistValues(INITIAL_NEW_THERAPIST_VALUES);
+        setNewTherapistErrors({});
+        setTherapistCreationError(undefined);
+        setTherapistSuccess(undefined);
+        setTherapistWarning(
+          "Terapeut je dodat, ali email za obaveštenja nije sačuvan. Možete ga podesiti kroz Izmeni.",
+        );
+      } else {
+        setTherapistCreationError(
+          "Došlo je do neočekivane greške. Pokušajte ponovo.",
+        );
+      }
     } finally {
       therapistCreationInProgress.current = false;
       setIsCreatingTherapist(false);
@@ -613,14 +741,20 @@ export default function AdminSettingsPage() {
   }
 
   function openEditTherapistForm(therapist: Therapist) {
+    const contactEmail = therapistContactEmails?.find(
+      (contact) => String(contact.therapistId) === String(therapist.id),
+    )?.email;
+
     setSelectedTherapist(therapist);
     setEditTherapistValues({
       name: therapist.name,
       speciality: therapist.speciality,
+      email: contactEmail ?? "",
     });
     setEditTherapistErrors({});
     setTherapistUpdateError(undefined);
     setTherapistSuccess(undefined);
+    setTherapistWarning(undefined);
   }
 
   function closeEditTherapistForm() {
@@ -646,6 +780,7 @@ export default function AdminSettingsPage() {
     const therapistId = selectedTherapist.id;
     const name = editTherapistValues.name.trim();
     const speciality = editTherapistValues.speciality.trim();
+    const email = editTherapistValues.email.trim();
     const nextErrors: Partial<
       Record<keyof NewTherapistValues, string>
     > = {};
@@ -658,6 +793,12 @@ export default function AdminSettingsPage() {
       nextErrors.speciality = "Unesite specijalnost terapeuta.";
     }
 
+    if (!email) {
+      nextErrors.email = "Unesite email za obaveštenja.";
+    } else if (!EMAIL_PATTERN.test(email)) {
+      nextErrors.email = "Unesite ispravnu email adresu.";
+    }
+
     setEditTherapistErrors(nextErrors);
     setTherapistUpdateError(undefined);
 
@@ -667,6 +808,7 @@ export default function AdminSettingsPage() {
 
     therapistUpdateInProgress.current = true;
     setIsUpdatingTherapist(true);
+    let therapistUpdated = false;
 
     try {
       const { data, error } = await supabase.rpc("admin_update_therapist", {
@@ -682,29 +824,48 @@ export default function AdminSettingsPage() {
         return;
       }
 
-      setTherapists((currentTherapists) =>
-        currentTherapists?.map((therapist) =>
-          String(therapist.id) === String(therapistId)
-            ? { ...therapist, name, speciality }
-            : therapist,
-        ),
+      therapistUpdated = true;
+      const { data: emailResult, error: emailError } = await supabase.rpc(
+        "admin_set_therapist_email",
+        {
+          p_therapist_id: therapistId,
+          p_email: email,
+        },
       );
+      const emailSaved = !emailError && emailResult === "updated";
 
-      const refreshedTherapists = await loadTherapists();
+      await refreshTherapistsAndContactEmails();
 
       setSelectedTherapist(null);
       setEditTherapistValues(INITIAL_NEW_THERAPIST_VALUES);
       setEditTherapistErrors({});
-      setTherapistSuccess("Podaci terapeuta su uspešno izmenjeni.");
+      setTherapistUpdateError(undefined);
 
-      if (refreshedTherapists) {
-        setTherapists(refreshedTherapists);
-        setPageError(undefined);
+      if (emailSaved) {
+        setTherapistSuccess("Podaci terapeuta su uspešno izmenjeni.");
+        setTherapistWarning(undefined);
+      } else {
+        setTherapistSuccess(undefined);
+        setTherapistWarning(
+          "Podaci terapeuta su sačuvani, ali email za obaveštenja nije sačuvan. Pokušajte ponovo kroz Izmeni.",
+        );
       }
     } catch {
-      setTherapistUpdateError(
-        "Došlo je do neočekivane greške. Pokušajte ponovo.",
-      );
+      if (therapistUpdated) {
+        await refreshTherapistsAndContactEmails();
+        setSelectedTherapist(null);
+        setEditTherapistValues(INITIAL_NEW_THERAPIST_VALUES);
+        setEditTherapistErrors({});
+        setTherapistUpdateError(undefined);
+        setTherapistSuccess(undefined);
+        setTherapistWarning(
+          "Podaci terapeuta su sačuvani, ali email za obaveštenja nije sačuvan. Pokušajte ponovo kroz Izmeni.",
+        );
+      } else {
+        setTherapistUpdateError(
+          "Došlo je do neočekivane greške. Pokušajte ponovo.",
+        );
+      }
     } finally {
       therapistUpdateInProgress.current = false;
       setIsUpdatingTherapist(false);
@@ -1369,7 +1530,7 @@ export default function AdminSettingsPage() {
   }
 
   return (
-    <div className="relative flex min-h-screen flex-col overflow-hidden bg-[#fffaf3] text-[#243c38]">
+    <div className="relative flex min-h-screen flex-col overflow-x-clip bg-[#fffaf3] text-[#243c38]">
       <div
         aria-hidden="true"
         className="absolute -top-24 -right-24 h-72 w-72 rounded-full bg-[#e2f0e7] sm:h-96 sm:w-96"
@@ -1379,7 +1540,7 @@ export default function AdminSettingsPage() {
         className="absolute -bottom-28 -left-28 h-64 w-64 rounded-full bg-[#f9dfcb] sm:h-80 sm:w-80"
       />
 
-      <header className="relative z-10 border-b border-[#243c38]/8">
+      <header className="sticky top-0 z-40 border-b border-[#243c38]/8 bg-[#fffaf3]/95 backdrop-blur-lg">
         <div className="mx-auto flex w-full max-w-7xl items-center justify-between gap-4 px-6 py-5 sm:px-8 lg:px-10">
           <Link
             href="/"
@@ -1402,7 +1563,7 @@ export default function AdminSettingsPage() {
                 href="/admin"
                 className="inline-flex min-h-11 items-center justify-center rounded-full border border-[#397267]/20 bg-white/75 px-4 py-2.5 text-sm font-semibold text-[#397267] transition hover:border-[#397267]/35 hover:bg-white focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[#397267] sm:px-5"
               >
-                Raspored
+                Nazad na kalendar
               </Link>
               <button
                 type="button"
@@ -1531,6 +1692,24 @@ export default function AdminSettingsPage() {
                   </div>
                 )}
 
+                {therapistWarning && (
+                  <div
+                    role="status"
+                    className="mt-7 rounded-2xl border border-[#c78a32]/25 bg-[#fff8e8] px-5 py-4 text-sm font-medium leading-6 text-[#805b24]"
+                  >
+                    {therapistWarning}
+                  </div>
+                )}
+
+                {therapistContactEmailsError && (
+                  <div
+                    role="alert"
+                    className="mt-7 rounded-2xl border border-[#b45745]/20 bg-[#fff8f5] px-5 py-4 text-sm font-medium text-[#8f4033]"
+                  >
+                    {therapistContactEmailsError}
+                  </div>
+                )}
+
                 {therapistStatusError && !therapistToDeactivate && (
                   <div
                     role="alert"
@@ -1560,11 +1739,12 @@ export default function AdminSettingsPage() {
                   </div>
                 ) : (
                   <ul className="mt-7 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                    {therapists.map((therapist) => (
-                      <li
-                        key={String(therapist.id)}
-                        className="flex flex-col rounded-2xl border border-[#397267]/12 bg-[#fffdf9] p-5"
-                      >
+                    {therapists.map((therapist) => {
+                      return (
+                        <li
+                          key={String(therapist.id)}
+                          className="flex flex-col rounded-2xl border border-[#397267]/12 bg-[#fffdf9] p-5"
+                        >
                         <div className="flex items-start justify-between gap-3">
                           <p className="text-lg font-semibold text-[#243c38]">
                             {therapist.name}
@@ -1579,10 +1759,10 @@ export default function AdminSettingsPage() {
                             {therapist.isActive ? "Aktivan" : "Neaktivan"}
                           </span>
                         </div>
-                        <p className="mt-2 text-sm leading-6 text-[#6b807c]">
-                          {therapist.speciality}
-                        </p>
-                        <div className="mt-auto flex flex-wrap gap-2 pt-5">
+                          <p className="mt-2 text-sm leading-6 text-[#6b807c]">
+                            {therapist.speciality}
+                          </p>
+                          <div className="mt-auto flex flex-wrap gap-2 pt-5">
                           <button
                             type="button"
                             onClick={() => openEditTherapistForm(therapist)}
@@ -1617,9 +1797,10 @@ export default function AdminSettingsPage() {
                                 ? "Deaktiviraj"
                                 : "Aktiviraj"}
                           </button>
-                        </div>
-                      </li>
-                    ))}
+                          </div>
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
               </section>
@@ -2694,7 +2875,7 @@ export default function AdminSettingsPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="new-therapist-title"
-            className="w-full max-w-lg rounded-3xl border border-white/80 bg-[#fffaf3] p-6 shadow-[0_28px_90px_rgba(23,43,39,0.28)] sm:p-8"
+            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-3xl border border-white/80 bg-[#fffaf3] p-6 shadow-[0_28px_90px_rgba(23,43,39,0.28)] sm:p-8"
           >
             <div className="flex items-start justify-between gap-5">
               <div>
@@ -2821,6 +3002,55 @@ export default function AdminSettingsPage() {
                 )}
               </div>
 
+              <div className="mt-5">
+                <label
+                  htmlFor="new-therapist-email"
+                  className="block text-sm font-semibold text-[#243c38]"
+                >
+                  Email za obaveštenja{" "}
+                  <span className="text-[#b45745]">*</span>
+                </label>
+                <input
+                  id="new-therapist-email"
+                  type="email"
+                  autoComplete="email"
+                  required
+                  value={newTherapistValues.email}
+                  onChange={(event) => {
+                    setNewTherapistValues((currentValues) => ({
+                      ...currentValues,
+                      email: event.target.value,
+                    }));
+                    setNewTherapistErrors((currentErrors) => ({
+                      ...currentErrors,
+                      email: undefined,
+                    }));
+                    setTherapistCreationError(undefined);
+                  }}
+                  disabled={isCreatingTherapist}
+                  aria-invalid={Boolean(newTherapistErrors.email)}
+                  aria-describedby={
+                    newTherapistErrors.email
+                      ? "new-therapist-email-error"
+                      : undefined
+                  }
+                  className={`mt-2 min-h-12 w-full rounded-2xl border bg-[#fffdf9] px-4 py-3 text-base text-[#243c38] outline-none transition focus:ring-3 disabled:cursor-wait disabled:opacity-60 ${
+                    newTherapistErrors.email
+                      ? "border-[#b45745] focus:border-[#b45745] focus:ring-[#b45745]/15"
+                      : "border-[#397267]/18 focus:border-[#397267]/45 focus:ring-[#397267]/12"
+                  }`}
+                />
+                {newTherapistErrors.email && (
+                  <p
+                    id="new-therapist-email-error"
+                    role="alert"
+                    className="mt-2 text-sm font-medium text-[#a34838]"
+                  >
+                    {newTherapistErrors.email}
+                  </p>
+                )}
+              </div>
+
               {therapistCreationError && (
                 <div
                   role="alert"
@@ -2866,7 +3096,7 @@ export default function AdminSettingsPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="edit-therapist-title"
-            className="w-full max-w-lg rounded-3xl border border-white/80 bg-[#fffaf3] p-6 shadow-[0_28px_90px_rgba(23,43,39,0.28)] sm:p-8"
+            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-3xl border border-white/80 bg-[#fffaf3] p-6 shadow-[0_28px_90px_rgba(23,43,39,0.28)] sm:p-8"
           >
             <div className="flex items-start justify-between gap-5">
               <div>
@@ -2989,6 +3219,55 @@ export default function AdminSettingsPage() {
                     className="mt-2 text-sm font-medium text-[#a34838]"
                   >
                     {editTherapistErrors.speciality}
+                  </p>
+                )}
+              </div>
+
+              <div className="mt-5">
+                <label
+                  htmlFor="edit-therapist-email"
+                  className="block text-sm font-semibold text-[#243c38]"
+                >
+                  Email za obaveštenja{" "}
+                  <span className="text-[#b45745]">*</span>
+                </label>
+                <input
+                  id="edit-therapist-email"
+                  type="email"
+                  autoComplete="email"
+                  required
+                  value={editTherapistValues.email}
+                  onChange={(event) => {
+                    setEditTherapistValues((currentValues) => ({
+                      ...currentValues,
+                      email: event.target.value,
+                    }));
+                    setEditTherapistErrors((currentErrors) => ({
+                      ...currentErrors,
+                      email: undefined,
+                    }));
+                    setTherapistUpdateError(undefined);
+                  }}
+                  disabled={isUpdatingTherapist}
+                  aria-invalid={Boolean(editTherapistErrors.email)}
+                  aria-describedby={
+                    editTherapistErrors.email
+                      ? "edit-therapist-email-error"
+                      : undefined
+                  }
+                  className={`mt-2 min-h-12 w-full rounded-2xl border bg-[#fffdf9] px-4 py-3 text-base text-[#243c38] outline-none transition focus:ring-3 disabled:cursor-wait disabled:opacity-60 ${
+                    editTherapistErrors.email
+                      ? "border-[#b45745] focus:border-[#b45745] focus:ring-[#b45745]/15"
+                      : "border-[#397267]/18 focus:border-[#397267]/45 focus:ring-[#397267]/12"
+                  }`}
+                />
+                {editTherapistErrors.email && (
+                  <p
+                    id="edit-therapist-email-error"
+                    role="alert"
+                    className="mt-2 text-sm font-medium text-[#a34838]"
+                  >
+                    {editTherapistErrors.email}
                   </p>
                 )}
               </div>
