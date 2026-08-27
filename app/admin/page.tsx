@@ -2756,6 +2756,21 @@ export default function AdminPage() {
     }
   }
 
+  const activeCalendarTherapists =
+    therapists?.filter((therapist) => therapist.isActive) ?? [];
+  const activeCalendarTherapistIds = new Set(
+    activeCalendarTherapists.map((therapist) => String(therapist.id)),
+  );
+  const visibleWorkingHours = workingHours.filter((workingHour) =>
+    activeCalendarTherapistIds.has(String(workingHour.therapistId)),
+  );
+  const visibleAppointments = appointments.filter((appointment) =>
+    activeCalendarTherapistIds.has(String(appointment.therapistId)),
+  );
+  const visibleUnavailability = unavailability.filter((interval) =>
+    activeCalendarTherapistIds.has(String(interval.therapistId)),
+  );
+
   return (
     <div className="relative flex min-h-screen flex-col overflow-hidden bg-[#fffaf3] text-[#243c38]">
       <div
@@ -2950,9 +2965,9 @@ export default function AdminPage() {
                 </div>
               )}
 
-              {therapists.length === 0 ? (
+              {activeCalendarTherapists.length === 0 ? (
                 <p className="mt-6 rounded-2xl border border-[#397267]/12 bg-white/70 px-5 py-4 text-sm font-medium text-[#526b66]">
-                  Trenutno nema unetih terapeuta.
+                  Trenutno nema aktivnih terapeuta.
                 </p>
               ) : isScheduleLoading ? (
                 <div
@@ -2977,17 +2992,17 @@ export default function AdminPage() {
                 </div>
               ) : (
                 <>
-                  {appointments.length === 0 && (
+                  {visibleAppointments.length === 0 && (
                     <p className="mt-6 rounded-2xl border border-[#397267]/12 bg-white/70 px-5 py-4 text-sm font-medium text-[#526b66]">
                       Nema zakazanih termina za izabrani dan.
                     </p>
                   )}
                   <div className="mt-6">
                     <DailyCalendar
-                      therapists={therapists}
-                      workingHours={workingHours}
-                      appointments={appointments}
-                      unavailability={unavailability}
+                      therapists={activeCalendarTherapists}
+                      workingHours={visibleWorkingHours}
+                      appointments={visibleAppointments}
+                      unavailability={visibleUnavailability}
                       onAppointmentClick={openAppointmentDetails}
                       onUnavailabilityClick={openUnavailabilityDetails}
                     />
