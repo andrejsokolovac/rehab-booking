@@ -7,6 +7,7 @@ import { supabase } from "@/lib/supabase";
 
 const BELGRADE_TIME_ZONE = "Europe/Belgrade";
 const PIXELS_PER_MINUTE = 1.6;
+const CALENDAR_BOUNDARY_INSET = 16;
 const WEEKDAY_NAMES = [
   "Ponedeljak",
   "Utorak",
@@ -703,19 +704,27 @@ function WeeklyCalendar({
             className="relative border-r border-[#397267]/12 bg-[#f8f5ef]"
             style={{ height: calendarHeight }}
           >
-            {timeLabels.map((minute) => (
-              <span
-                key={minute}
-                className="absolute right-3 -translate-y-1/2 text-xs font-medium text-[#6b807c]"
-                style={{
-                  top:
-                    (minute - visibleRange.startMinutes) *
-                    PIXELS_PER_MINUTE,
-                }}
-              >
-                {formatTime(minute)}
-              </span>
-            ))}
+            {timeLabels.map((minute) => {
+              const isFirstLabel = minute === visibleRange.startMinutes;
+              const isLastLabel = minute === visibleRange.endMinutes;
+
+              return (
+                <span
+                  key={minute}
+                  className="absolute right-3 -translate-y-1/2 text-xs font-medium text-[#6b807c]"
+                  style={{
+                    top: isFirstLabel
+                      ? CALENDAR_BOUNDARY_INSET
+                      : isLastLabel
+                        ? calendarHeight - CALENDAR_BOUNDARY_INSET
+                        : (minute - visibleRange.startMinutes) *
+                          PIXELS_PER_MINUTE,
+                  }}
+                >
+                  {formatTime(minute)}
+                </span>
+              );
+            })}
           </div>
 
           {weekDays.map((day) => {
@@ -765,7 +774,7 @@ function WeeklyCalendar({
                   );
                 })}
 
-                {timeLabels.map((minute) => (
+                {timeLabels.slice(1, -1).map((minute) => (
                   <div
                     key={minute}
                     aria-hidden="true"
